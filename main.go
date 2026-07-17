@@ -14,32 +14,25 @@ import (
 )
 
 const (
-	modbusURL  = "tcp://192.168.1.4:502"
-	pollPeriod = 5 * time.Second
+	// modbusTimeout is the per-request Modbus timeout. Connection details,
+	// poll interval, database path, and the device registry now come from
+	// config.json (see config.go).
+	modbusTimeout = 2 * time.Second
 
-	dbPath = "victron.db"
-
+	// disabledUnitID marks an in-memory device with no exposed Modbus port
+	// (config modbus_unit: null). Such devices are never polled.
 	disabledUnitID = -1
 
-	// Stable app-assigned device IDs form a single global registry across all
-	// device tables: 1 = aggregate shunt, 2..6 = the five banks (see the banks
-	// slice), 7 = the charge controller.
-	allBanksDeviceID         = 1
-	chargeControllerDeviceID = 7
-	allBanksName             = "All Banks"
-
-	// The aggregate shunt (unit 239) is a battery service, so it uses the same
-	// register map as the individual banks (258=Power, 259=Voltage,
+	// Victron protocol facts, fixed by the device type rather than by the
+	// installation. The aggregate shunt is a battery service, so it uses the
+	// same register map as the individual banks (258=Power, 259=Voltage,
 	// 261=Current) plus SOC at 266 — not the System map at 840.
-	allBanksUnitID        = 239
 	allBanksStartAddress  = 258
 	allBanksRegisterCount = 4
 	allBanksSOCAddress    = 266
 
 	bankStartAddress  = 258
 	bankRegisterCount = 4
-
-	solarChargerUnitID = 238
 )
 
 type AllBanksReading struct {
@@ -89,9 +82,21 @@ func main() {
 	)
 	defer stop()
 
+	// A missing or invalid config at startup is fatal: there is no prior
+	// good state to fall back to, and guessing defaults would be worse than
+	// a clear error.
+	path := configPath()
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		logger.Error("failed to load configuration", "path", path, "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("configuration loaded", "path", path, "devices", len(cfg.Devices))
+
 	client, err := modbus.NewClient(&modbus.ClientConfiguration{
-		URL:     modbusURL,
-		Timeout: 2 * time.Second,
+		URL:     cfg.ModbusURL,
+		Timeout: modbusTimeout,
 	})
 	if err != nil {
 		logger.Error("failed to create Modbus client", "error", err)
@@ -101,7 +106,7 @@ func main() {
 	if err := client.Open(); err != nil {
 		logger.Error(
 			"failed to connect to Victron Modbus server",
-			"url", modbusURL,
+			"url", cfg.ModbusURL,
 			"error", err,
 		)
 		os.Exit(1)
@@ -109,12 +114,12 @@ func main() {
 
 	logger.Info(
 		"connected to Victron Modbus server",
-		"url", modbusURL,
+		"url", cfg.ModbusURL,
 	)
 
-	db, err := OpenDatabase(dbPath)
+	db, err := OpenDatabase(cfg.DatabasePath)
 	if err != nil {
-		logger.Error("failed to open database", "path", dbPath, "error", err)
+		logger.Error("failed to open database", "path", cfg.DatabasePath, "error", err)
 		os.Exit(1)
 	}
 
@@ -123,39 +128,59 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("database ready", "path", dbPath)
+	logger.Info("database ready", "path", cfg.DatabasePath)
 
-	// All banks are registered, including those not currently wired up. Banks
-	// 1 and 2 have no exposed Modbus port (disabledUnitID), so they are never
-	// polled and stay offline until hardware is connected.
-	banks := []BatteryBank{
-		{ID: 2, Name: "Bank 1", UnitID: disabledUnitID},
-		{ID: 3, Name: "Bank 2", UnitID: disabledUnitID},
-		{ID: 4, Name: "Bank 3", UnitID: 235},
-		{ID: 5, Name: "Bank 4", UnitID: 233},
-		{ID: 6, Name: "Bank 5", UnitID: 236},
-	}
-
-	solarCharger := SolarCharger{
-		ID:     chargeControllerDeviceID,
-		Name:   "PV Charger",
-		UnitID: solarChargerUnitID,
-	}
-
-	if err := seedDevices(db, banks, &solarCharger); err != nil {
+	if err := seedDevices(db, cfg); err != nil {
 		logger.Error("failed to seed device registry", "error", err)
 		os.Exit(1)
 	}
 
-	pollAndPrint(logger, db, client, banks, &solarCharger)
+	// The device registry, connection, and database are established once at
+	// startup. Changing them requires a restart; only the poll interval is
+	// applied live (see the reload below).
+	aggregate, banks, charger := buildDevices(cfg)
 
-	ticker := time.NewTicker(pollPeriod)
+	pollAndPrint(logger, db, client, aggregate, banks, charger)
+
+	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
+
+	current := cfg
+	configHealthy := true
 
 	for {
 		select {
 		case <-ticker.C:
-			pollAndPrint(logger, db, client, banks, &solarCharger)
+			// Re-read config each cycle. On failure keep the last-good copy,
+			// logging only on the healthy->broken transition to avoid spamming
+			// while the file is mid-edit.
+			if fresh, err := LoadConfig(path); err != nil {
+				if configHealthy {
+					logger.Warn(
+						"failed to reload configuration; keeping last-good",
+						"path", path,
+						"error", err,
+					)
+					configHealthy = false
+				}
+			} else {
+				if !configHealthy {
+					logger.Info("configuration reload recovered", "path", path)
+					configHealthy = true
+				}
+
+				if fresh.PollIntervalSeconds != current.PollIntervalSeconds {
+					ticker.Reset(time.Duration(fresh.PollIntervalSeconds) * time.Second)
+					logger.Info(
+						"poll interval changed",
+						"seconds", fresh.PollIntervalSeconds,
+					)
+				}
+
+				current = fresh
+			}
+
+			pollAndPrint(logger, db, client, aggregate, banks, charger)
 
 		case <-ctx.Done():
 			logger.Info("shutdown signal received")
@@ -181,29 +206,66 @@ func main() {
 	}
 }
 
-// seedDevices registers every known device in its status table so that even
-// never-polled devices (such as disconnected banks) are visible as offline
-// from startup. Existing rows are left untouched.
-func seedDevices(db *sql.DB, banks []BatteryBank, charger *SolarCharger) error {
-	if err := seedDevice(
-		db, tableBatteryShunt, allBanksDeviceID,
-		modbusID(allBanksUnitID), allBanksName,
-	); err != nil {
-		return err
+// buildDevices turns the configured device list into the in-memory structures
+// the poll loop uses: the single aggregate shunt (nil if none), the individual
+// banks, and the charge controller (nil if none). validate() has already
+// guaranteed device types are valid and at most one aggregate exists.
+func buildDevices(cfg Config) (aggregate *BatteryBank, banks []BatteryBank, charger *SolarCharger) {
+	for _, d := range cfg.Devices {
+		switch d.DeviceType {
+		case DeviceTypeShunt:
+			bank := BatteryBank{
+				ID:     d.ID,
+				Name:   d.Name,
+				UnitID: unitOrDisabled(d.ModbusUnit),
+			}
+			if d.Aggregate {
+				agg := bank
+				aggregate = &agg
+			} else {
+				banks = append(banks, bank)
+			}
+
+		case DeviceTypeChargeController:
+			charger = &SolarCharger{
+				ID:     d.ID,
+				Name:   d.Name,
+				UnitID: unitOrDisabled(d.ModbusUnit),
+			}
+		}
 	}
 
-	for _, bank := range banks {
+	return aggregate, banks, charger
+}
+
+// unitOrDisabled converts a configured (nullable) Modbus unit into the
+// in-memory representation, treating a null port as the disabled sentinel.
+func unitOrDisabled(unit *int) int {
+	if unit == nil {
+		return disabledUnitID
+	}
+
+	return *unit
+}
+
+// seedDevices registers every configured device in its status table so that
+// even never-polled devices (such as disconnected banks) are visible as
+// offline from startup. Existing rows are left untouched.
+func seedDevices(db *sql.DB, cfg Config) error {
+	for _, d := range cfg.Devices {
+		table := tableBatteryShunt
+		if d.DeviceType == DeviceTypeChargeController {
+			table = tableChargeController
+		}
+
 		if err := seedDevice(
-			db, tableBatteryShunt, bank.ID, modbusID(bank.UnitID), bank.Name,
+			db, table, d.ID, modbusID(unitOrDisabled(d.ModbusUnit)), d.Name,
 		); err != nil {
 			return err
 		}
 	}
 
-	return seedDevice(
-		db, tableChargeController, charger.ID,
-		modbusID(charger.UnitID), charger.Name,
-	)
+	return nil
 }
 
 // modbusID converts an in-memory unit ID into a nullable database value,
@@ -220,6 +282,7 @@ func pollAndPrint(
 	logger *slog.Logger,
 	db *sql.DB,
 	client *modbus.ModbusClient,
+	aggregate *BatteryBank,
 	banks []BatteryBank,
 	solarCharger *SolarCharger,
 ) {
@@ -227,33 +290,35 @@ func pollAndPrint(
 	// shares the same reading time.
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 
-	allBanks, err := readAllBanks(client)
-	if err != nil {
-		logger.Error(
-			"failed to read All Banks registers",
-			"unit_id", allBanksUnitID,
-			"error", err,
-		)
+	if aggregate != nil {
+		allBanks, err := readAllBanks(client, aggregate.UnitID)
+		if err != nil {
+			logger.Error(
+				"failed to read All Banks registers",
+				"unit_id", aggregate.UnitID,
+				"error", err,
+			)
 
-		if err := markDeviceOffline(db, tableBatteryShunt, allBanksDeviceID); err != nil {
-			logger.Error("failed to mark All Banks offline", "error", err)
-		}
-	} else {
-		printAllBanks(allBanks)
+			if err := markDeviceOffline(db, tableBatteryShunt, aggregate.ID); err != nil {
+				logger.Error("failed to mark All Banks offline", "error", err)
+			}
+		} else {
+			printAllBanks(aggregate.Name, allBanks)
 
-		shunt := ShuntStatus{
-			ID:       allBanksDeviceID,
-			ModbusID: allBanksUnitID,
-			Name:     allBanksName,
-			Voltage:  allBanks.Voltage,
-			Current:  allBanks.Current,
-			Wattage:  int(allBanks.Power),
-			// The aggregate owns the pool SOC.
-			SOC: sql.NullInt64{Int64: int64(allBanks.SOC), Valid: true},
-		}
+			shunt := ShuntStatus{
+				ID:       aggregate.ID,
+				ModbusID: aggregate.UnitID,
+				Name:     aggregate.Name,
+				Voltage:  allBanks.Voltage,
+				Current:  allBanks.Current,
+				Wattage:  int(allBanks.Power),
+				// The aggregate owns the pool SOC.
+				SOC: sql.NullInt64{Int64: int64(allBanks.SOC), Valid: true},
+			}
 
-		if err := upsertBatteryShunt(db, shunt, updatedAt); err != nil {
-			logger.Error("failed to store All Banks reading", "error", err)
+			if err := upsertBatteryShunt(db, shunt, updatedAt); err != nil {
+				logger.Error("failed to store All Banks reading", "error", err)
+			}
 		}
 	}
 
@@ -341,8 +406,9 @@ func pollAndPrint(
 
 func readAllBanks(
 	client *modbus.ModbusClient,
+	unitID int,
 ) (AllBanksReading, error) {
-	client.SetUnitId(allBanksUnitID)
+	client.SetUnitId(uint8(unitID))
 
 	registers, err := client.ReadRegisters(
 		allBanksStartAddress,
@@ -488,10 +554,11 @@ func readRegisterBlock(
 	return registers, nil
 }
 
-func printAllBanks(reading AllBanksReading) {
+func printAllBanks(name string, reading AllBanksReading) {
 	fmt.Printf(
-		"%s | All Banks  | Voltage: %.1f V | Current: %.1f A | Power: %d W | SOC: %d%%\n",
+		"%s | %-10s | Voltage: %.1f V | Current: %.1f A | Power: %d W | SOC: %d%%\n",
 		currentTime(),
+		name,
 		reading.Voltage,
 		reading.Current,
 		reading.Power,
