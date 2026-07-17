@@ -1,0 +1,223 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+
+	_ "modernc.org/sqlite"
+)
+
+const (
+	tableBatteryShunt     = "battery_shunt_status"
+	tableChargeController = "charge_controller_status"
+)
+
+// ShuntStatus is a single current-status snapshot for one battery shunt,
+// ready to be written to the battery_shunt_status table.
+//
+// SOC is only populated for the aggregate shunt that owns the pool state of
+// charge. For an individual bank it stays zero-valued (Valid: false) and is
+// stored as SQL NULL, which is the deliberate signal that the bank is not the
+// source of truth for SOC.
+type ShuntStatus struct {
+	ID       int
+	ModbusID int
+	Name     string
+
+	Voltage float64
+	Current float64
+	Wattage int
+
+	SOC sql.NullInt64
+}
+
+// OpenDatabase opens (creating it if needed) the SQLite database at path and
+// verifies the connection.
+//
+// busy_timeout makes a briefly-locked database wait rather than fail
+// immediately, which matters once a future HTTP API reads while we write. WAL
+// journaling lets those readers run concurrently with the poller's writes.
+func OpenDatabase(path string) (*sql.DB, error) {
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("connect to database: %w", err)
+	}
+
+	return db, nil
+}
+
+// createSchema creates the tables if they do not already exist. It is safe to
+// run on every startup.
+func createSchema(db *sql.DB) error {
+	// modbus_id is nullable: a registered device with no exposed Modbus port
+	// (e.g. a disconnected bank) has no mapping. updated_at is nullable: it
+	// records the last successful reading, so a never-read device is NULL.
+	// status is 'online' after a successful read and 'offline' otherwise.
+	const schema = `
+CREATE TABLE IF NOT EXISTS battery_shunt_status (
+    id         INTEGER PRIMARY KEY,
+    modbus_id  INTEGER,
+    name       TEXT    NOT NULL,
+    voltage    REAL,
+    current    REAL,
+    wattage    INTEGER,
+    soc        INTEGER,
+    status     TEXT    NOT NULL DEFAULT 'offline',
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS charge_controller_status (
+    id              INTEGER PRIMARY KEY,
+    modbus_id       INTEGER,
+    name            TEXT    NOT NULL,
+    battery_voltage REAL,
+    battery_current REAL,
+    pv_voltage      REAL,
+    pv_current      REAL,
+    pv_power        REAL,
+    yield_today     REAL,
+    max_power_today INTEGER,
+    charge_state    INTEGER,
+    mpp_mode        INTEGER,
+    error_code      INTEGER,
+    status          TEXT    NOT NULL DEFAULT 'offline',
+    updated_at      TEXT
+);`
+
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("create schema: %w", err)
+	}
+
+	return nil
+}
+
+// upsertBatteryShunt writes the latest reading for one shunt, keeping exactly
+// one current row per device ID. The first poll inserts the row; every poll
+// after updates it in place.
+func upsertBatteryShunt(db *sql.DB, s ShuntStatus, updatedAt string) error {
+	// A successful reading is by definition online.
+	const query = `
+INSERT INTO battery_shunt_status
+    (id, modbus_id, name, voltage, current, wattage, soc, status, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 'online', ?)
+ON CONFLICT(id) DO UPDATE SET
+    modbus_id  = excluded.modbus_id,
+    name       = excluded.name,
+    voltage    = excluded.voltage,
+    current    = excluded.current,
+    wattage    = excluded.wattage,
+    soc        = excluded.soc,
+    status     = excluded.status,
+    updated_at = excluded.updated_at;`
+
+	_, err := db.Exec(
+		query,
+		s.ID, s.ModbusID, s.Name,
+		s.Voltage, s.Current, s.Wattage, s.SOC,
+		updatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert battery shunt %q: %w", s.Name, err)
+	}
+
+	return nil
+}
+
+// ChargeControllerStatus is a single current-status snapshot for one solar
+// charge controller, ready to be written to the charge_controller_status
+// table. The charge_state, mpp_mode, and error_code fields store the raw
+// Victron codes; decoding to human-readable text is a display concern.
+type ChargeControllerStatus struct {
+	ID       int
+	ModbusID int
+	Name     string
+
+	BatteryVoltage float64
+	BatteryCurrent float64
+
+	PVVoltage float64
+	PVCurrent float64
+	PVPower   float64
+
+	YieldToday    float64
+	MaxPowerToday int
+
+	ChargeState int
+	MPPMode     int
+	ErrorCode   int
+}
+
+// upsertChargeController writes the latest reading for one charge controller,
+// keeping exactly one current row per device ID.
+func upsertChargeController(db *sql.DB, c ChargeControllerStatus, updatedAt string) error {
+	const query = `
+INSERT INTO charge_controller_status
+    (id, modbus_id, name, battery_voltage, battery_current,
+     pv_voltage, pv_current, pv_power, yield_today, max_power_today,
+     charge_state, mpp_mode, error_code, status, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', ?)
+ON CONFLICT(id) DO UPDATE SET
+    modbus_id       = excluded.modbus_id,
+    name            = excluded.name,
+    battery_voltage = excluded.battery_voltage,
+    battery_current = excluded.battery_current,
+    pv_voltage      = excluded.pv_voltage,
+    pv_current      = excluded.pv_current,
+    pv_power        = excluded.pv_power,
+    yield_today     = excluded.yield_today,
+    max_power_today = excluded.max_power_today,
+    charge_state    = excluded.charge_state,
+    mpp_mode        = excluded.mpp_mode,
+    error_code      = excluded.error_code,
+    status          = excluded.status,
+    updated_at      = excluded.updated_at;`
+
+	_, err := db.Exec(
+		query,
+		c.ID, c.ModbusID, c.Name,
+		c.BatteryVoltage, c.BatteryCurrent,
+		c.PVVoltage, c.PVCurrent, c.PVPower, c.YieldToday, c.MaxPowerToday,
+		c.ChargeState, c.MPPMode, c.ErrorCode,
+		updatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert charge controller %q: %w", c.Name, err)
+	}
+
+	return nil
+}
+
+// seedDevice inserts a registered device's identity row if it does not already
+// exist, leaving status at its 'offline' default and reading fields NULL. It
+// never overwrites an existing row, so it is safe to run on every startup.
+// modbusID is NULL for a device with no exposed Modbus port.
+func seedDevice(db *sql.DB, table string, id int, modbusID sql.NullInt64, name string) error {
+	query := fmt.Sprintf(`
+INSERT INTO %s (id, modbus_id, name) VALUES (?, ?, ?)
+ON CONFLICT(id) DO NOTHING;`, table)
+
+	if _, err := db.Exec(query, id, modbusID, name); err != nil {
+		return fmt.Errorf("seed device %d in %s: %w", id, table, err)
+	}
+
+	return nil
+}
+
+// markDeviceOffline flags a device offline after a failed read, leaving its
+// last-good reading and updated_at untouched so you can see when it was last
+// healthy.
+func markDeviceOffline(db *sql.DB, table string, id int) error {
+	query := fmt.Sprintf(`UPDATE %s SET status = 'offline' WHERE id = ?;`, table)
+
+	if _, err := db.Exec(query, id); err != nil {
+		return fmt.Errorf("mark device %d offline in %s: %w", id, table, err)
+	}
+
+	return nil
+}
