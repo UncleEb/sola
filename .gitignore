@@ -1,0 +1,13 @@
+# Compiled binaries
+victron-collector
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Local configuration
+config.yaml
+
+# VS Code local state
+.vscode/
