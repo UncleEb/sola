@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Solar Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Decorative background: a gentle flight through a starfield. -->
+    <canvas id="starfield"></canvas>
+
+    <header class="topbar">
+        <h1>Solar Dashboard</h1>
+        <div id="connection" class="pill pill--unknown">
+            <span class="pill__dot"></span>
+            <span id="connection-text">Connecting…</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Solar charger: PV in, battery out. The power-flow animation sits in
+             its own block below the title, above the reading columns. -->
+        <section class="panel" id="charger-panel">
+            <h2 class="panel__title">Solar Charger</h2>
+            <div id="charger-flow" class="charger-flow"></div>
+            <div id="charger" class="charger charger--empty">
+                <p class="empty">No charge controller registered.</p>
+            </div>
+        </section>
+
+        <!-- Battery pool aggregate: the single source of truth for SOC -->
+        <section class="panel" id="aggregate-panel">
+            <h2 class="panel__title">Battery Pool</h2>
+            <div id="aggregate" class="aggregate">
+                <p class="empty">Waiting for data…</p>
+            </div>
+        </section>
+
+        <!-- Individual banks -->
+        <section class="panel" id="banks-panel">
+            <h2 class="panel__title">Battery Banks</h2>
+            <div id="banks" class="banks">
+                <p class="empty">Waiting for data…</p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <span id="last-update">—</span>
+    </footer>
+
+    <script src="starfield.js"></script>
+    <script src="dashboard.js"></script>
+</body>
+</html>

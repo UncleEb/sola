@@ -9,19 +9,23 @@ This project is intentionally being built incrementally. Every feature should ha
 
 Current Status
 
-Current prototype functionality:
+Current functionality:
 
 Connects to Venus OS using Modbus TCP.
-Polls every five seconds.
+Polls on a configurable interval (default five seconds).
 Reads:
 Aggregate ("All Banks") telemetry.
 Individual battery banks.
 Solar charger telemetry.
-Displays readings in the terminal.
-Handles graceful shutdown (Ctrl+C / SIGTERM).
-Uses structured logging (log/slog).
+Stores the latest reading per device in SQLite (one current-status row each).
+Serves a live web dashboard and a JSON status endpoint over HTTP.
+Loads deployment settings from config.json, reloaded each poll.
+Handles graceful shutdown (Ctrl+C / SIGTERM), including the HTTP server.
+Uses structured logging (log/slog); per-poll readings print to the terminal
+only when "debug" is enabled in config.json.
 
-No database or web API has been implemented yet.
+Historical storage does not exist yet: only the most recent reading per device
+is kept, so the dashboard is a live "now" view rather than a time-series.
 
 Design Philosophy
 
@@ -71,7 +75,8 @@ Battery Bank 5	236
 
 Battery Banks 1 and 2 are currently disconnected.
 
-The collector currently reads aggregate battery values from the System service (Unit ID 100) using registers 840–843.
+Device unit IDs, names, and enable/disable now live in config.json; this table
+is a human-readable summary of the current installation.
 
 Coding Guidelines
 

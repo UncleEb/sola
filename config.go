@@ -21,18 +21,25 @@ type Config struct {
 	ModbusURL           string         `json:"modbus_url"`
 	PollIntervalSeconds int            `json:"poll_interval_seconds"`
 	DatabasePath        string         `json:"database_path"`
+	HTTPAddr            string         `json:"http_addr"` // dashboard listen address; defaults to defaultHTTPAddr
+	Debug               bool           `json:"debug"`     // when true, print each poll's readings to stdout
 	Devices             []DeviceConfig `json:"devices"`
 }
+
+// defaultHTTPAddr is the dashboard listen address used when http_addr is
+// omitted from the config file.
+const defaultHTTPAddr = ":8088"
 
 // DeviceConfig describes one device in the registry. ModbusUnit is a pointer so
 // that a null in the file (a device with no exposed Modbus port) is
 // distinguishable from unit 0.
 type DeviceConfig struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	DeviceType string `json:"device_type"` // DeviceTypeShunt | DeviceTypeChargeController
-	ModbusUnit *int   `json:"modbus_unit"` // nil = no exposed port
-	Aggregate  bool   `json:"aggregate"`   // shunt that owns pool SOC
+	ID          int      `json:"id"`
+	Name        string   `json:"name"`
+	DeviceType  string   `json:"device_type"`  // DeviceTypeShunt | DeviceTypeChargeController
+	ModbusUnit  *int     `json:"modbus_unit"`  // nil = no exposed port
+	Aggregate   bool     `json:"aggregate"`    // shunt that owns pool SOC
+	MaxAmperage *float64 `json:"max_amperage"` // charge_controller only: rated output amps, used to scale the dashboard flow animation
 }
 
 // configPath returns the path to config.json. The directory is overridable via
@@ -61,6 +68,12 @@ func LoadConfig(path string) (Config, error) {
 
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid config %s: %w", path, err)
+	}
+
+	// An omitted listen address is not an error; fall back to the default so
+	// the dashboard still comes up.
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = defaultHTTPAddr
 	}
 
 	return cfg, nil
@@ -103,9 +116,15 @@ func (c Config) validate() error {
 			if d.Aggregate {
 				aggregates++
 			}
+			if d.MaxAmperage != nil {
+				return fmt.Errorf("device %d: max_amperage is only valid for %q", d.ID, DeviceTypeChargeController)
+			}
 		case DeviceTypeChargeController:
 			if d.Aggregate {
 				return fmt.Errorf("device %d: aggregate is only valid for %q", d.ID, DeviceTypeShunt)
+			}
+			if d.MaxAmperage != nil && *d.MaxAmperage <= 0 {
+				return fmt.Errorf("device %d: max_amperage must be positive, got %g", d.ID, *d.MaxAmperage)
 			}
 		default:
 			return fmt.Errorf("device %d: unknown device_type %q", d.ID, d.DeviceType)

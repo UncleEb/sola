@@ -1,0 +1,336 @@
+:root {
+    /*--bg: #0e1116;*/
+    --bg:#000000;
+    --panel: #171c24;
+    --panel-2: #1f2733;
+    --border: #2a323f;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --good: #3fb950;
+    --bad: #f85149;
+    --idle: #6e7681;
+    --pv: #f5a623;
+    --battery: #58a6ff;
+    --flow: #4cc2ff;        /* blue energy flow */
+    /* Glass surfaces: translucent so the starfield glows through, with a
+       frosted highlight border. */
+    --glass-bg: rgba(23, 28, 36, 0.55);
+    --glass-bg-2: rgba(255, 255, 255, 0.04);
+    --glass-border: rgba(255, 255, 255, 0.09);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.4;
+}
+
+/* Full-window starfield canvas, fixed behind all content and click-through. */
+#starfield {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    display: block;
+    pointer-events: none;
+}
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(14px) saturate(130%);
+    backdrop-filter: blur(14px) saturate(130%);
+}
+
+.topbar h1 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+}
+
+/* Connection / staleness pill */
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+}
+
+.pill__dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--idle);
+}
+
+.pill--live .pill__dot { background: var(--good); box-shadow: 0 0 8px var(--good); }
+.pill--stale .pill__dot { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+.pill--unknown .pill__dot { background: var(--idle); }
+
+main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    display: grid;
+    gap: 1.5rem;
+}
+
+.panel {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(14px) saturate(130%);
+    backdrop-filter: blur(14px) saturate(130%);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+.panel__title {
+    margin: 0 0 1rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.empty {
+    color: var(--muted);
+    font-style: italic;
+    margin: 0;
+}
+
+/* ---- Solar charger ---- */
+
+/* The power-flow animation and its caption sit in their own block directly
+   below the panel title and above the reading columns, left-aligned under the
+   "Solar Charger" heading so they don't fight the readings for alignment. */
+.charger-flow {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
+}
+
+.charger {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+    gap: 1rem 2rem;
+}
+
+.charger--empty { display: block; }
+
+.flow-side {
+    display: grid;
+    gap: 0.5rem;
+}
+
+.flow-side h3 {
+    margin: 0;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.reading-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 0.5rem 1rem;
+}
+
+.reading {
+    display: grid;
+    gap: 0.1rem;
+}
+
+.reading__value {
+    font-size: 1.35rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.reading__label {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.reading--pv .reading__value { color: var(--pv); }
+.reading--battery .reading__value { color: var(--battery); }
+
+/* Animated power-flow connector between PV and battery: a squiggly wire with
+   energy pulses travelling PV -> battery when the charger is producing. */
+.flow {
+    width: 90px;
+    height: 96px;
+    display: flex;
+    align-items: center;
+}
+
+.flow__wave {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.flow__wave path {
+    fill: none;
+    stroke: var(--flow);
+    stroke-width: 4;
+    stroke-linecap: round;
+    /* One pulse (~45 units) followed by a gap larger than the whole path
+       (~220 units) so exactly one energy pulse is ever on the wire. */
+    stroke-dasharray: 45 260;
+    filter: drop-shadow(0 0 4px var(--flow));
+}
+
+/* Negative dashoffset marches the pulse along the path start-to-end (left to
+   right), i.e. from PV toward the battery. One full pattern (45+260 = 305) per
+   2.18s gives ~140 u/s travel speed. */
+.flow--active .flow__wave path {
+    animation: flow-pulse 2.18s linear infinite;
+}
+
+.flow--idle {
+    opacity: 0.4;
+}
+
+@keyframes flow-pulse {
+    to { stroke-dashoffset: -305; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .flow__wave path { animation: none; }
+}
+
+.charger__state {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    padding-top: 0.75rem;
+    margin-top: 0.25rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.charger__state strong { color: var(--text); font-weight: 600; }
+
+/* ---- Aggregate battery pool ---- */
+.aggregate {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    flex-wrap: wrap;
+}
+
+.soc-ring {
+    --soc: 0;
+    position: relative;
+    width: 140px;
+    height: 140px;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+}
+
+/* The coloured ring is a masked pseudo-element so its hollow centre is truly
+   transparent — the starfield shows through the glass behind it. */
+.soc-ring::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(var(--good) calc(var(--soc) * 1%), rgba(255, 255, 255, 0.1) 0);
+    -webkit-mask: radial-gradient(closest-side, transparent 71%, #000 72%);
+            mask: radial-gradient(closest-side, transparent 71%, #000 72%);
+}
+
+/* Keep the centred value/label above the ring pseudo-element. */
+.soc-ring > * {
+    position: relative;
+}
+
+.soc-ring__value {
+    font-size: 2rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.soc-ring__label {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+/* ---- Bank grid ---- */
+.banks {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 1rem;
+}
+
+.bank {
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    padding: 1rem;
+    display: grid;
+    gap: 0.75rem;
+}
+
+.bank__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.bank__name { font-weight: 600; }
+
+.status-dot {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.status-dot::before {
+    content: "";
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    background: var(--idle);
+}
+
+.status-dot--online::before { background: var(--good); box-shadow: 0 0 6px var(--good); }
+.status-dot--offline::before { background: var(--bad); }
+.status-dot--disconnected::before { background: var(--idle); }
+
+.bank--offline { opacity: 0.65; }
+.bank--disconnected { opacity: 0.45; }
+
+.bank__readings {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem;
+}
+
+.footer {
+    text-align: center;
+    padding: 1rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+}

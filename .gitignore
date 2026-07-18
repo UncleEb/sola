@@ -11,3 +11,6 @@ config.yaml
 
 # VS Code local state
 .vscode/
+
+# Claude Code project instructions (local, not shared)
+CLAUDE.md

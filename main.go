@@ -140,7 +140,11 @@ func main() {
 	// applied live (see the reload below).
 	aggregate, banks, charger := buildDevices(cfg)
 
-	pollAndPrint(logger, db, client, aggregate, banks, charger)
+	// The dashboard reads the current-status tables the poll loop maintains. It
+	// uses the startup address; changing http_addr requires a restart.
+	dashboard := StartDashboard(logger, db, cfg)
+
+	pollAndStore(logger, db, client, aggregate, banks, charger, cfg.Debug)
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
@@ -180,10 +184,12 @@ func main() {
 				current = fresh
 			}
 
-			pollAndPrint(logger, db, client, aggregate, banks, charger)
+			pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug)
 
 		case <-ctx.Done():
 			logger.Info("shutdown signal received")
+
+			shutdownDashboard(dashboard, logger)
 
 			if err := client.Close(); err != nil {
 				logger.Error(
@@ -278,13 +284,14 @@ func modbusID(unitID int) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(unitID), Valid: true}
 }
 
-func pollAndPrint(
+func pollAndStore(
 	logger *slog.Logger,
 	db *sql.DB,
 	client *modbus.ModbusClient,
 	aggregate *BatteryBank,
 	banks []BatteryBank,
 	solarCharger *SolarCharger,
+	debug bool,
 ) {
 	// One timestamp for the whole poll so every row updated in this cycle
 	// shares the same reading time.
@@ -303,7 +310,9 @@ func pollAndPrint(
 				logger.Error("failed to mark All Banks offline", "error", err)
 			}
 		} else {
-			printAllBanks(aggregate.Name, allBanks)
+			if debug {
+				printAllBanks(aggregate.Name, allBanks)
+			}
 
 			shunt := ShuntStatus{
 				ID:       aggregate.ID,
@@ -345,7 +354,9 @@ func pollAndPrint(
 			continue
 		}
 
-		printBatteryBank(banks[i])
+		if debug {
+			printBatteryBank(banks[i])
+		}
 
 		shunt := ShuntStatus{
 			ID:       banks[i].ID,
@@ -378,7 +389,9 @@ func pollAndPrint(
 			logger.Error("failed to mark charge controller offline", "error", err)
 		}
 	} else {
-		printSolarCharger(*solarCharger)
+		if debug {
+			printSolarCharger(*solarCharger)
+		}
 
 		controller := ChargeControllerStatus{
 			ID:             solarCharger.ID,
@@ -401,7 +414,10 @@ func pollAndPrint(
 		}
 	}
 
-	fmt.Println()
+	// Blank line separates one poll's readings from the next in debug output.
+	if debug {
+		fmt.Println()
+	}
 }
 
 func readAllBanks(
