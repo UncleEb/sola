@@ -1,5 +1,6 @@
 # Compiled binaries
 sola
+victron-collector
 
 # Local databases
 *.db
