@@ -1,0 +1,19 @@
+# Keep the build context small and free of local/runtime state.
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+README.md
+CLAUDE.md
+.vscode/
+
+# Local runtime artifacts — must never be baked into the image.
+config.json
+*.db
+*.db-wal
+*.db-shm
+
+# Compiled binaries.
+sola
+victron-collector

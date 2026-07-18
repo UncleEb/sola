@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -88,6 +90,12 @@ type SolarCharger struct {
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	// `sola healthcheck` probes the running dashboard and exits 0/1. It exists
+	// so the distroless container (no shell, no curl) can define a HEALTHCHECK.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(runHealthcheck())
+	}
+
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -95,41 +103,40 @@ func main() {
 	)
 	defer stop()
 
-	// A missing or invalid config at startup is fatal: there is no prior
-	// good state to fall back to, and guessing defaults would be worse than
-	// a clear error.
+	// On a fresh install (e.g. an empty mounted volume) there is no config yet;
+	// seed a valid default so the service can boot and be configured from there
+	// rather than failing outright.
 	path := configPath()
+	if created, err := ensureDefaultConfig(path); err != nil {
+		logger.Error("failed to write default configuration", "path", path, "error", err)
+		os.Exit(1)
+	} else if created {
+		logger.Info(
+			"wrote default configuration; set MODBUS_URL (or edit the file) and add your devices in the dashboard",
+			"path", path,
+		)
+	}
+
+	// An invalid (unparseable) config is still fatal: there is no prior good
+	// state to fall back to, and guessing would be worse than a clear error.
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		logger.Error("failed to load configuration", "path", path, "error", err)
 		os.Exit(1)
 	}
 
+	// MODBUS_URL overrides the configured address so an operator can point the
+	// container at their device without editing the mounted config file.
+	if url := os.Getenv("MODBUS_URL"); url != "" {
+		if url != cfg.ModbusURL {
+			logger.Info("modbus_url overridden by MODBUS_URL", "url", url)
+		}
+		cfg.ModbusURL = url
+	}
+
 	logger.Info("configuration loaded", "path", path, "devices", len(cfg.Devices))
 
-	client, err := modbus.NewClient(&modbus.ClientConfiguration{
-		URL:     cfg.ModbusURL,
-		Timeout: modbusTimeout,
-	})
-	if err != nil {
-		logger.Error("failed to create Modbus client", "error", err)
-		os.Exit(1)
-	}
-
-	if err := client.Open(); err != nil {
-		logger.Error(
-			"failed to connect to Victron Modbus server",
-			"url", cfg.ModbusURL,
-			"error", err,
-		)
-		os.Exit(1)
-	}
-
-	logger.Info(
-		"connected to Victron Modbus server",
-		"url", cfg.ModbusURL,
-	)
-
+	// The database is essential and is established once at startup.
 	db, err := OpenDatabase(cfg.DatabasePath)
 	if err != nil {
 		logger.Error("failed to open database", "path", cfg.DatabasePath, "error", err)
@@ -148,20 +155,60 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The connection and database are established once at startup; changing
-	// modbus_url, database_path, or http_addr requires a restart. The device
-	// registry, poll interval, and debug flag are all applied live (see the
-	// reload below).
-	aggregate, banks, charger := buildDevices(cfg)
-
-	// The dashboard reads the current-status tables the poll loop maintains. It
-	// uses the startup address; changing http_addr requires a restart.
+	// The dashboard comes up before — and independently of — the Modbus link,
+	// so the UI is reachable even when the device is not. It reads the
+	// current-status tables the poll loop maintains; changing http_addr
+	// requires a restart.
 	dashboard := StartDashboard(logger, db, cfg, path)
 
+	// The device registry, poll interval, and debug flag are applied live (see
+	// the reload below); modbus_url, database_path, and http_addr are fixed for
+	// the process lifetime.
+	aggregate, banks, charger := buildDevices(cfg)
+
+	// The Modbus client is created once. A malformed URL is non-fatal: log it
+	// and serve the dashboard anyway so the operator can correct the config,
+	// rather than crash-looping.
+	var client *modbus.ModbusClient
+	if c, err := modbus.NewClient(&modbus.ClientConfiguration{
+		URL:     cfg.ModbusURL,
+		Timeout: modbusTimeout,
+	}); err != nil {
+		logger.Error(
+			"invalid modbus_url; polling disabled until restart with a valid URL",
+			"url", cfg.ModbusURL,
+			"error", err,
+		)
+	} else {
+		client = c
+	}
+
+	// Connect lazily and keep retrying: an unreachable device at startup, a
+	// device reboot, or a network blip must never take the service down. Log
+	// only on connection-state transitions to stay quiet during an outage.
+	connected := false
+	if client != nil {
+		if err := client.Open(); err != nil {
+			logger.Warn(
+				"Victron Modbus server unreachable; dashboard is up, will keep retrying",
+				"url", cfg.ModbusURL,
+				"error", err,
+			)
+		} else {
+			connected = true
+			logger.Info("connected to Victron Modbus server", "url", cfg.ModbusURL)
+		}
+	}
+
 	// History snapshots are captured from the poll loop (no separate goroutine)
-	// at most once per history interval. The first poll records a snapshot.
+	// at most once per history interval. The first successful poll records one.
 	lastHistoryAt := time.Now()
-	pollAndStore(logger, db, client, aggregate, banks, charger, cfg.Debug, true)
+	if connected {
+		if !pollAndStore(logger, db, client, aggregate, banks, charger, cfg.Debug, true) {
+			_ = client.Close()
+			connected = false
+		}
+	}
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
@@ -209,28 +256,49 @@ func main() {
 				current = fresh
 			}
 
-			// Record a history snapshot once per (hot-appliable) history
-			// interval. It is a floor: snapshots ride poll cycles, so they can't
-			// be closer together than the poll interval.
-			recordHistory := time.Since(lastHistoryAt) >= time.Duration(current.HistoryIntervalSec)*time.Second
-			if recordHistory {
-				lastHistoryAt = time.Now()
-			}
+			// Keep the Modbus link healthy: (re)connect if needed, then poll. A
+			// poll that fails wholesale means the link dropped, so close and
+			// reconnect on the next tick. Logging is transition-only so a
+			// sustained outage does not spam.
+			if client != nil {
+				if !connected {
+					if err := client.Open(); err == nil {
+						connected = true
+						logger.Info("reconnected to Victron Modbus server", "url", cfg.ModbusURL)
+					}
+				}
 
-			pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug, recordHistory)
+				if connected {
+					// Record a history snapshot once per (hot-appliable) history
+					// interval. It is a floor: snapshots ride poll cycles, so they
+					// can't be closer together than the poll interval.
+					recordHistory := time.Since(lastHistoryAt) >= time.Duration(current.HistoryIntervalSec)*time.Second
+					if recordHistory {
+						lastHistoryAt = time.Now()
+					}
+
+					if !pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug, recordHistory) {
+						logger.Warn("Modbus link lost; will reconnect", "url", cfg.ModbusURL)
+						_ = client.Close()
+						connected = false
+					}
+				}
+			}
 
 		case <-ctx.Done():
 			logger.Info("shutdown signal received")
 
 			shutdownDashboard(dashboard, logger)
 
-			if err := client.Close(); err != nil {
-				logger.Error(
-					"failed to close Modbus connection",
-					"error", err,
-				)
-			} else {
-				logger.Info("Modbus connection closed")
+			if client != nil {
+				if err := client.Close(); err != nil {
+					logger.Error(
+						"failed to close Modbus connection",
+						"error", err,
+					)
+				} else {
+					logger.Info("Modbus connection closed")
+				}
 			}
 
 			if err := db.Close(); err != nil {
@@ -243,6 +311,36 @@ func main() {
 			return
 		}
 	}
+}
+
+// runHealthcheck probes the local dashboard's /api/status and returns a process
+// exit code (0 healthy, 1 not). It backs the container HEALTHCHECK, since the
+// distroless image has no shell or curl to run one the usual way.
+func runHealthcheck() int {
+	addr := defaultHTTPAddr
+	if cfg, err := LoadConfig(configPath()); err == nil && cfg.HTTPAddr != "" {
+		addr = cfg.HTTPAddr
+	}
+
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		port = "8088"
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/api/status")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck: unexpected status", resp.StatusCode)
+		return 1
+	}
+
+	return 0
 }
 
 // buildDevices turns the configured device list into the in-memory structures
@@ -373,10 +471,14 @@ func pollAndStore(
 	solarCharger *SolarCharger,
 	debug bool,
 	recordHistory bool,
-) {
+) bool {
 	// One timestamp for the whole poll so every row updated in this cycle
 	// shares the same reading time.
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
+
+	// Track read outcomes so the caller can distinguish a dropped link (every
+	// read failed) from a single misconfigured device (some reads succeeded).
+	attempted, failed := 0, 0
 
 	if aggregate != nil {
 		// The aggregate reads from the System register map when sourced from the
@@ -386,8 +488,10 @@ func pollAndStore(
 			readAggregate = readSystem
 		}
 
+		attempted++
 		allBanks, err := readAggregate(client, aggregate.UnitID)
 		if err != nil {
+			failed++
 			logger.Error(
 				"failed to read All Banks registers",
 				"unit_id", aggregate.UnitID,
@@ -430,7 +534,9 @@ func pollAndStore(
 			continue
 		}
 
+		attempted++
 		if err := readBatteryBank(client, &banks[i]); err != nil {
+			failed++
 			logger.Error(
 				"failed to read battery bank",
 				"bank", banks[i].Name,
@@ -485,7 +591,9 @@ func pollAndStore(
 	// or was deleted live). Skip the read entirely rather than dereferencing a
 	// nil charger.
 	if solarCharger != nil {
+		attempted++
 		if err := readSolarCharger(client, solarCharger); err != nil {
+			failed++
 			logger.Error(
 				"failed to read solar charger",
 				"charger", solarCharger.Name,
@@ -533,6 +641,10 @@ func pollAndStore(
 	if debug {
 		fmt.Println()
 	}
+
+	// Healthy unless every attempted read failed (or there was nothing to
+	// read): a partial failure is a per-device problem, not a dead link.
+	return !(attempted > 0 && failed == attempted)
 }
 
 func readAllBanks(

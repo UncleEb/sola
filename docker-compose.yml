@@ -1,0 +1,19 @@
+services:
+  sola:
+    build:
+      context: .
+    image: sola:latest
+    container_name: sola
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      # Point this at your Victron Venus OS device's Modbus TCP endpoint.
+      # Overrides modbus_url in the config file so you don't have to edit it.
+      MODBUS_URL: "tcp://192.168.1.4:502"
+    volumes:
+      # Named volume holds config.json + sola.db (history) across restarts.
+      - sola-data:/data
+
+volumes:
+  sola-data:

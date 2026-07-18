@@ -122,6 +122,52 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+// defaultConfig returns a minimal, valid configuration used to bootstrap a
+// fresh install (e.g. an empty mounted Docker volume). It is deliberately
+// generic: a placeholder Modbus URL — overridden by the MODBUS_URL env var or
+// by editing config.json — and a single System aggregate device on the Venus
+// default unit 100, so the dashboard comes up and can be tailored from there.
+func defaultConfig() Config {
+	unit := 100
+	return Config{
+		ModbusURL:           "tcp://192.168.1.100:502",
+		PollIntervalSeconds: 5,
+		DatabasePath:        "sola.db",
+		HTTPAddr:            defaultHTTPAddr,
+		SOCLowPercent:       defaultSOCLowPercent,
+		Background:          defaultBackground,
+		HistoryIntervalSec:  defaultHistoryIntervalSec,
+		NextDeviceID:        2,
+		Devices: []DeviceConfig{
+			{ID: 1, Name: "Battery Pool", DeviceType: DeviceTypeSystem, ModbusUnit: &unit},
+		},
+	}
+}
+
+// ensureDefaultConfig writes a default config to path when none exists yet, so
+// a first run against an empty config directory (a freshly mounted volume) can
+// boot instead of failing. It reports whether it created the file; an existing
+// config is left untouched.
+func ensureDefaultConfig(path string) (created bool, err error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("stat config %s: %w", path, err)
+	}
+
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, fmt.Errorf("create config dir %s: %w", dir, err)
+		}
+	}
+
+	if err := SaveConfig(path, defaultConfig()); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // SaveConfig validates cfg and writes it to path atomically (temp file in the
 // same directory, then rename) so a concurrent reader — the poll loop reloads
 // config every cycle — never observes a half-written file. It refuses to write

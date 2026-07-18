@@ -27,6 +27,39 @@ only when "debug" is enabled in config.json.
 Historical storage does not exist yet: only the most recent reading per device
 is kept, so the dashboard is a live "now" view rather than a time-series.
 
+Running with Docker
+
+Sola builds to a single static binary with the web UI embedded, so the image is
+tiny (~13 MB), runs as a non-root user, and needs no runtime dependencies.
+
+Quick start (docker compose):
+
+    # Set MODBUS_URL in docker-compose.yml to your Venus OS device, then:
+    docker compose up -d --build
+
+The dashboard is then at http://localhost:8088.
+
+config.json and the SQLite database live in a named volume (sola-data, mounted
+at /data), so they persist across restarts and upgrades. On first run against an
+empty volume, Sola writes a default config.json that you can edit or configure
+from the dashboard. The MODBUS_URL environment variable overrides modbus_url so
+you can point the container at your device without editing the file.
+
+The Modbus link is not required for the dashboard to start: if the device is
+unreachable, Sola serves the UI anyway and keeps retrying the connection, so a
+device reboot or network blip never takes the service down.
+
+The container runs as uid 65532. A named volume inherits writable ownership
+automatically; a bind mount (-v /host/path:/data) must be writable by uid 65532.
+
+Building a multi-arch image (amd64 + arm64) and pushing to a registry:
+
+    docker buildx build --platform linux/amd64,linux/arm64 \
+        -t <registry>/sola:<tag> --push .
+
+The image defines a HEALTHCHECK that runs "sola healthcheck", which probes the
+dashboard's /api/status endpoint (the distroless image has no shell or curl).
+
 Design Philosophy
 
 This project favors:
