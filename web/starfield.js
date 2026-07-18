@@ -11,7 +11,7 @@
     const ctx = canvas.getContext("2d");
 
     const STAR_COUNT = 320;
-    const SPEED = 2; // depth units travelled toward the viewer per frame
+    const SPEED = 0.5; // depth units travelled toward the viewer per frame
     const FOCAL = 128; // perspective strength: larger spreads stars out faster
     const COLOR = "180, 210, 255"; // faint blue-white points of light
 

@@ -35,6 +35,10 @@ type dashboardServer struct {
 	// It is a config fact (not stored in the database) that the client uses to
 	// scale the flow animation. Chargers without a configured value are absent.
 	maxAmperage map[int]float64
+
+	// socLowPercent is the pool-wide "low" SOC threshold the client uses to
+	// colour the ring (config fact, not stored in the database).
+	socLowPercent int
 }
 
 // StartDashboard builds the HTTP server, begins listening in the background,
@@ -42,10 +46,11 @@ type dashboardServer struct {
 // the dashboard but not to the collector, so it is logged rather than returned.
 func StartDashboard(logger *slog.Logger, db *sql.DB, cfg Config) *http.Server {
 	handler := &dashboardServer{
-		db:           db,
-		logger:       logger,
-		aggregateIDs: aggregateIDs(cfg),
-		maxAmperage:  chargerMaxAmperage(cfg),
+		db:            db,
+		logger:        logger,
+		aggregateIDs:  aggregateIDs(cfg),
+		maxAmperage:   chargerMaxAmperage(cfg),
+		socLowPercent: cfg.SOCLowPercent,
 	}
 
 	srv := &http.Server{
@@ -166,8 +171,9 @@ type chargerJSON struct {
 
 // statusResponse is the whole dashboard payload for one refresh.
 type statusResponse struct {
-	Shunts  []shuntJSON  `json:"shunts"`
-	Charger *chargerJSON `json:"charger"`
+	Shunts        []shuntJSON  `json:"shunts"`
+	Charger       *chargerJSON `json:"charger"`
+	SOCLowPercent int          `json:"soc_low_percent"`
 }
 
 func (s *dashboardServer) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +191,11 @@ func (s *dashboardServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := statusResponse{Shunts: shunts, Charger: charger}
+	payload := statusResponse{
+		Shunts:        shunts,
+		Charger:       charger,
+		SOCLowPercent: s.socLowPercent,
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(payload); err != nil {

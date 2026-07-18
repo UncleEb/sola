@@ -1,5 +1,4 @@
 :root {
-    /*--bg: #0e1116;*/
     --bg:#000000;
     --panel: #171c24;
     --panel-2: #1f2733;
@@ -13,10 +12,13 @@
     --battery: #58a6ff;
     --flow: #4cc2ff;        /* blue energy flow */
     /* Glass surfaces: translucent so the starfield glows through, with a
-       frosted highlight border. */
-    --glass-bg: rgba(23, 28, 36, 0.55);
+       frosted highlight border. Two independent levers:
+         --glass-bg alpha  → how much dark tint overlays the backdrop (murkiness)
+         --glass-blur      → how smeared the starfield is (frosted ↔ clear glass) */
+    --glass-bg: rgba(23, 28, 36, 0.45);
     --glass-bg-2: rgba(255, 255, 255, 0.04);
     --glass-border: rgba(255, 255, 255, 0.09);
+    --glass-blur: 6px;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -45,8 +47,8 @@ body {
     padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--glass-border);
     background: var(--glass-bg);
-    -webkit-backdrop-filter: blur(14px) saturate(130%);
-    backdrop-filter: blur(14px) saturate(130%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(130%);
+    backdrop-filter: blur(var(--glass-blur)) saturate(130%);
 }
 
 .topbar h1 {
@@ -88,8 +90,8 @@ main {
 
 .panel {
     background: var(--glass-bg);
-    -webkit-backdrop-filter: blur(14px) saturate(130%);
-    backdrop-filter: blur(14px) saturate(130%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(130%);
+    backdrop-filter: blur(var(--glass-blur)) saturate(130%);
     border: 1px solid var(--glass-border);
     border-radius: 12px;
     padding: 1.25rem;
@@ -254,25 +256,69 @@ main {
     position: absolute;
     inset: 0;
     border-radius: 50%;
-    background: conic-gradient(var(--good) calc(var(--soc) * 1%), rgba(255, 255, 255, 0.1) 0);
+    /* --ring-color is set per-refresh by JS (blue when healthy → orange when
+       low). The fallback keeps the ring sensible before the first update. */
+    background: conic-gradient(var(--ring-color, var(--battery)) calc(var(--soc) * 1%), rgba(255, 255, 255, 0.1) 0);
     -webkit-mask: radial-gradient(closest-side, transparent 71%, #000 72%);
             mask: radial-gradient(closest-side, transparent 71%, #000 72%);
 }
 
-/* Keep the centred value/label above the ring pseudo-element. */
+/* Keep the sweep and centred text above the ring pseudo-element. */
 .soc-ring > * {
     position: relative;
+}
+
+.soc-ring__text {
+    text-align: center;
+}
+
+/* Charging sweep: a soft white line clipped to the ring's hollow centre that
+   rises from the bottom to the top. inset matches the ~71% mask hole so the
+   line stays inside the ring. Sits behind the text (earlier in the DOM). */
+.soc-sweep {
+    position: absolute;
+    inset: 21px;
+    border-radius: 50%;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.soc-sweep::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: 2px;
+    /* Match the Solar Charger flow animation's colour (--flow). */
+    background: linear-gradient(to right, transparent, var(--flow), transparent);
+    box-shadow: 0 0 6px var(--flow);
+    opacity: 0;
+}
+
+/* Only animate while charging; the class toggles without rebuilding the DOM,
+   so a running sweep is never cut short. */
+.soc-ring--charging .soc-sweep::before {
+    animation: soc-rise 3s ease-in-out infinite;
+}
+
+@keyframes soc-rise {
+    0%   { top: 100%; opacity: 0; }
+    15%  { opacity: 1; }
+    85%  { opacity: 1; }
+    100% { top: -2px; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .soc-sweep::before { animation: none; }
 }
 
 .soc-ring__value {
     font-size: 2rem;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
-}
-
-.soc-ring__label {
-    font-size: 0.75rem;
-    color: var(--muted);
+    /* Match the ring: --ring-color is set on .soc-ring per refresh and inherits. */
+    color: var(--ring-color, var(--battery));
 }
 
 /* ---- Bank grid ---- */

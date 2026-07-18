@@ -21,14 +21,20 @@ type Config struct {
 	ModbusURL           string         `json:"modbus_url"`
 	PollIntervalSeconds int            `json:"poll_interval_seconds"`
 	DatabasePath        string         `json:"database_path"`
-	HTTPAddr            string         `json:"http_addr"` // dashboard listen address; defaults to defaultHTTPAddr
-	Debug               bool           `json:"debug"`     // when true, print each poll's readings to stdout
+	HTTPAddr            string         `json:"http_addr"`       // dashboard listen address; defaults to defaultHTTPAddr
+	Debug               bool           `json:"debug"`           // when true, print each poll's readings to stdout
+	SOCLowPercent       int            `json:"soc_low_percent"` // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
 	Devices             []DeviceConfig `json:"devices"`
 }
 
 // defaultHTTPAddr is the dashboard listen address used when http_addr is
 // omitted from the config file.
 const defaultHTTPAddr = ":8088"
+
+// defaultSOCLowPercent is the "low" SOC threshold used when soc_low_percent is
+// omitted. At/below it the dashboard ring is fully the low colour; at 100% it
+// is fully the healthy colour, interpolated in between.
+const defaultSOCLowPercent = 50
 
 // DeviceConfig describes one device in the registry. ModbusUnit is a pointer so
 // that a null in the file (a device with no exposed Modbus port) is
@@ -76,6 +82,11 @@ func LoadConfig(path string) (Config, error) {
 		cfg.HTTPAddr = defaultHTTPAddr
 	}
 
+	// An omitted (zero) low-SOC threshold falls back to the default.
+	if cfg.SOCLowPercent == 0 {
+		cfg.SOCLowPercent = defaultSOCLowPercent
+	}
+
 	return cfg, nil
 }
 
@@ -92,6 +103,10 @@ func (c Config) validate() error {
 
 	if c.DatabasePath == "" {
 		return errors.New("database_path is required")
+	}
+
+	if c.SOCLowPercent < 0 || c.SOCLowPercent > 100 {
+		return fmt.Errorf("soc_low_percent must be between 0 and 100, got %d", c.SOCLowPercent)
 	}
 
 	if len(c.Devices) == 0 {

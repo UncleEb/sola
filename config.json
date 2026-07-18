@@ -2,6 +2,7 @@
   "modbus_url": "tcp://192.168.1.4:502",
   "poll_interval_seconds": 5,
   "database_path": "victron.db",
+  "soc_low_percent": 60,
   "devices": [
     { "id": 1, "name": "All Banks",  "device_type": "shunt",             "modbus_unit": 239,  "aggregate": true },
     { "id": 2, "name": "Bank 1",     "device_type": "shunt",             "modbus_unit": null },

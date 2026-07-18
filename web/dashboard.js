@@ -32,8 +32,11 @@ const els = {
 // Demo mode (append ?demo to the URL) overlays synthetic charging data on top
 // of the real feed so the charger card can be seen "producing" after dark. It
 // never writes to the database and is clearly labelled, so it cannot be
-// mistaken for real readings.
-const DEMO = new URLSearchParams(location.search).has("demo");
+// mistaken for real readings. An optional ?soc=N (0-100) also forces the
+// battery-pool ring to that state-of-charge, e.g. ?demo&soc=75.
+const demoParams = new URLSearchParams(location.search);
+const DEMO = demoParams.has("soc") || demoParams.has("demo");
+const DEMO_SOC = demoParams.has("soc") ? Number(demoParams.get("soc")) : null;
 
 // ---- formatting helpers -------------------------------------------------
 
@@ -177,28 +180,84 @@ function renderCharger(charger) {
         </div>`;
 }
 
-function renderAggregate(shunts) {
+// SOC ring colour is interpolated between the "low" colour (--pv, orange) at
+// the low-SOC threshold and the "healthy" colour (--battery, blue) at 100%.
+// The endpoints are read from the stylesheet so they track the theme.
+const rootStyle = getComputedStyle(document.documentElement);
+const SOC_COLOR_LOW = parseHexColor(rootStyle.getPropertyValue("--pv"));
+const SOC_COLOR_HIGH = parseHexColor(rootStyle.getPropertyValue("--battery"));
+
+function parseHexColor(hex) {
+    hex = hex.trim().replace("#", "");
+    return [
+        parseInt(hex.slice(0, 2), 16),
+        parseInt(hex.slice(2, 4), 16),
+        parseInt(hex.slice(4, 6), 16),
+    ];
+}
+
+function mixColor(a, b, t) {
+    const ch = (i) => Math.round(a[i] + (b[i] - a[i]) * t);
+    return `rgb(${ch(0)}, ${ch(1)}, ${ch(2)})`;
+}
+
+// socRingColor maps state-of-charge to the ring colour: fully "low" (orange) at
+// or below lowPercent, fully "healthy" (blue) at 100%, interpolated between.
+function socRingColor(soc, lowPercent) {
+    if (soc === null || soc === undefined) {
+        return mixColor(SOC_COLOR_LOW, SOC_COLOR_HIGH, 1); // unknown → healthy
+    }
+    const span = 100 - lowPercent;
+    const t = span <= 0 ? 1 : Math.min(1, Math.max(0, (soc - lowPercent) / span));
+    return mixColor(SOC_COLOR_LOW, SOC_COLOR_HIGH, t);
+}
+
+// aggregateNodes caches the battery-pool DOM once built. As with the flow wave,
+// rebuilding innerHTML every refresh would restart the SOC ring's charging
+// sweep animation, so it could never finish rising; instead build once, mutate.
+let aggregateNodes = null;
+
+function renderAggregate(shunts, charging, socLow) {
     const agg = (shunts || []).find((s) => s.aggregate);
     if (!agg) {
         els.aggregate.innerHTML = `<p class="empty">No aggregate shunt registered.</p>`;
+        aggregateNodes = null;
         return;
     }
 
-    const soc = agg.soc;
-    const socText = soc === null || soc === undefined ? "—" : `${soc}%`;
-
-    els.aggregate.innerHTML = `
-        <div class="soc-ring" style="--soc: ${soc ?? 0}">
-            <div style="text-align:center">
-                <div class="soc-ring__value">${socText}</div>
-                <div class="soc-ring__label">State of charge</div>
+    if (!aggregateNodes) {
+        els.aggregate.innerHTML = `
+            <div class="soc-ring">
+                <div class="soc-sweep"></div>
+                <div class="soc-ring__text">
+                    <div class="soc-ring__value"></div>
+                </div>
             </div>
-        </div>
-        <div class="reading-grid" style="flex:1">
-            ${reading(agg.voltage, 1, "V", "Voltage")}
-            ${reading(agg.current, 1, "A", "Current")}
-            ${reading(agg.wattage, 0, "W", "Power")}
-        </div>`;
+            <div class="reading-grid" style="flex:1">
+                <div class="reading"><span class="reading__value" data-k="voltage"></span><span class="reading__label">Voltage</span></div>
+                <div class="reading"><span class="reading__value" data-k="current"></span><span class="reading__label">Current</span></div>
+                <div class="reading"><span class="reading__value" data-k="power"></span><span class="reading__label">Power</span></div>
+            </div>`;
+        aggregateNodes = {
+            ring: els.aggregate.querySelector(".soc-ring"),
+            value: els.aggregate.querySelector(".soc-ring__value"),
+            voltage: els.aggregate.querySelector('[data-k="voltage"]'),
+            current: els.aggregate.querySelector('[data-k="current"]'),
+            power: els.aggregate.querySelector('[data-k="power"]'),
+        };
+    }
+
+    const soc = agg.soc;
+    const low = Number.isFinite(socLow) ? socLow : 50;
+    aggregateNodes.ring.style.setProperty("--soc", soc ?? 0);
+    aggregateNodes.ring.style.setProperty("--ring-color", socRingColor(soc, low));
+    // Toggling the class only when charging changes leaves a running sweep
+    // animation untouched, so it keeps looping smoothly.
+    aggregateNodes.ring.classList.toggle("soc-ring--charging", !!charging);
+    aggregateNodes.value.textContent = soc === null || soc === undefined ? "—" : `${soc}%`;
+    aggregateNodes.voltage.textContent = fmt(agg.voltage, 1, "V");
+    aggregateNodes.current.textContent = fmt(agg.current, 1, "A");
+    aggregateNodes.power.textContent = fmt(agg.wattage, 0, "W");
 }
 
 function renderBanks(shunts) {
@@ -245,7 +304,8 @@ function setConnection(kind, text) {
 // applyDemo replaces the charger reading with a gently oscillating synthetic
 // charge so the wave animates at full height and the readouts look alive. The
 // battery current stays well above any sane max_amperage, so the wave sits near
-// full amplitude. The battery pool and banks are left as real data.
+// full amplitude. When ?soc=N is given it also forces the aggregate ring to
+// that state-of-charge; otherwise the battery pool and banks stay real.
 let demoTick = 0;
 function applyDemo(data) {
     demoTick++;
@@ -263,8 +323,16 @@ function applyDemo(data) {
     c.charge_state_name = "Bulk";
     c.mpp_mode_name = "Active";
     c.error_name = "None";
-
     data.charger = c;
+
+    if (DEMO_SOC !== null && !Number.isNaN(DEMO_SOC)) {
+        const agg = (data.shunts || []).find((s) => s.aggregate);
+        if (agg) {
+            agg.soc = DEMO_SOC;
+            agg.status = "online";
+        }
+    }
+
     return data;
 }
 
@@ -286,8 +354,11 @@ async function refresh() {
         data = applyDemo(data);
     }
 
+    // Charging drives both the flow wave and the SOC ring's rising sweep.
+    const charging = !!data.charger && flowAmplitude(data.charger) > 0;
+
     renderCharger(data.charger);
-    renderAggregate(data.shunts);
+    renderAggregate(data.shunts, charging, data.soc_low_percent);
     renderBanks(data.shunts);
 
     if (DEMO) {
