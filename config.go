@@ -71,10 +71,10 @@ type DeviceConfig struct {
 }
 
 // configPath returns the path to config.json. The directory is overridable via
-// VICTRON_CONFIG_DIR so a Docker deployment can mount it as a volume; it
+// SOLA_CONFIG_DIR so a Docker deployment can mount it as a volume; it
 // defaults to the current directory for local development.
 func configPath() string {
-	dir := os.Getenv("VICTRON_CONFIG_DIR")
+	dir := os.Getenv("SOLA_CONFIG_DIR")
 	if dir == "" {
 		dir = "."
 	}

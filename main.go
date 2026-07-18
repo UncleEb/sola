@@ -239,7 +239,7 @@ func main() {
 				logger.Info("database closed")
 			}
 
-			logger.Info("Victron collector stopped")
+			logger.Info("Sola stopped")
 			return
 		}
 	}

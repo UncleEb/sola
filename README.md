@@ -1,7 +1,7 @@
-Victron Collector
+Sola
 Project Overview
 
-Victron Collector is a lightweight Go service that polls telemetry from a Victron Venus OS device over Modbus TCP.
+Sola is a lightweight Go service that polls telemetry from a Victron Venus OS device over Modbus TCP.
 
 The long-term goal is to provide a simple, reliable telemetry collection service that stores historical data in SQLite and exposes the information for visualization, APIs, and automation without depending on Home Assistant.
 
@@ -52,14 +52,14 @@ Victron Devices
    Modbus TCP
         │
         ▼
-Victron Collector (Go)
+     Sola (Go)
         │
         ├── Current Status
         ├── Historical Storage
         ├── HTTP API
         └── Logging
 
-Visualization (Grafana, Home Assistant, custom dashboards, etc.) should consume data from the collector rather than directly from Modbus whenever practical.
+Visualization (Grafana, Home Assistant, custom dashboards, etc.) should consume data from Sola rather than directly from Modbus whenever practical.
 
 Current Device Layout
 

@@ -89,6 +89,19 @@ body[data-background="warpspeed"] {
     font-weight: 600;
 }
 
+/* Brand lockup in the topbar (links home). */
+.brand {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+}
+
+.brand__logo {
+    display: block;
+    height: 26px;
+    width: auto;
+}
+
 .topbar__left {
     display: flex;
     align-items: center;

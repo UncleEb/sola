@@ -21,6 +21,12 @@ import (
 //go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/devices.html web/devices.js web/device.html web/device.js web/settings.html web/settings.js web/history.html web/history.js
 var webFiles embed.FS
 
+// assetFiles holds the Sola brand assets (logo, icons, favicons), served under
+// /assets/ plus the root favicon paths browsers request.
+//
+//go:embed assets
+var assetFiles embed.FS
+
 // dashboardServer serves the read-only web dashboard: the static page and a
 // single JSON endpoint that reflects the current-status tables. It only reads
 // the database; all writes remain the poll loop's job.
@@ -124,6 +130,18 @@ func (s *dashboardServer) routes() http.Handler {
 	}
 
 	fileServer := http.FileServer(http.FS(static))
+
+	// Brand assets at /assets/<file>, plus the root paths browsers request
+	// directly (served straight from the embedded assets root).
+	assetsFS, err := fs.Sub(assetFiles, "assets")
+	if err != nil {
+		panic(fmt.Sprintf("brand assets not embedded: %v", err))
+	}
+	assetServer := http.FileServer(http.FS(assetsFS))
+	mux.Handle("GET /assets/", http.StripPrefix("/assets/", assetServer))
+	mux.Handle("GET /favicon.ico", assetServer)
+	mux.Handle("GET /favicon.svg", assetServer)
+	mux.Handle("GET /apple-touch-icon.png", assetServer)
 
 	pages := map[string]string{
 		"/":         "/solar_dashboard.html",

@@ -1,7 +1,7 @@
 {
   "modbus_url": "tcp://192.168.1.4:502",
   "poll_interval_seconds": 5,
-  "database_path": "victron.db",
+  "database_path": "sola.db",
   "http_addr": ":8088",
   "debug": false,
   "soc_low_percent": 60,

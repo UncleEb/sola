@@ -1,4 +1,4 @@
-module victron-collector
+module sola
 
 go 1.26.5
 
