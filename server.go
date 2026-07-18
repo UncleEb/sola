@@ -18,7 +18,7 @@ import (
 // collector a single deployable binary: there are no loose files to lose or
 // keep in sync on the target machine.
 //
-//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/devices.html web/devices.js web/device.html web/device.js web/settings.html web/settings.js
+//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/devices.html web/devices.js web/device.html web/device.js web/settings.html web/settings.js web/history.html web/history.js
 var webFiles embed.FS
 
 // dashboardServer serves the read-only web dashboard: the static page and a
@@ -111,6 +111,9 @@ func (s *dashboardServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
 
+	// Per-device historical series for the graphs.
+	mux.HandleFunc("GET /api/history", s.handleHistory)
+
 	// Serve the embedded assets by name, mapping the clean page paths to their
 	// backing HTML files.
 	static, err := fs.Sub(webFiles, "web")
@@ -127,6 +130,7 @@ func (s *dashboardServer) routes() http.Handler {
 		"/devices":  "/devices.html",
 		"/device":   "/device.html",
 		"/settings": "/settings.html",
+		"/history":  "/history.html",
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -562,6 +566,102 @@ func (s *dashboardServer) handleUpdateSettings(w http.ResponseWriter, r *http.Re
 	}
 
 	writeJSON(w, settingsBody{Background: cfg.Background})
+}
+
+// historyPoint is one sample: timestamp and value (null if the reading was
+// missing at that snapshot).
+type historyPoint struct {
+	T string   `json:"t"`
+	V *float64 `json:"v"`
+}
+
+type historyResponse struct {
+	DeviceID int            `json:"device_id"`
+	Name     string         `json:"name"`
+	Field    string         `json:"field"`
+	Unit     string         `json:"unit"`
+	Minutes  int            `json:"minutes"`
+	Points   []historyPoint `json:"points"`
+}
+
+const maxHistoryMinutes = 7 * 24 * 60 // one week
+
+// handleHistory returns a device's measurement series over the last N minutes.
+// For now the series is amperage: a shunt/system reports its current, a charge
+// controller its battery current. The device's type (from config) selects the
+// history table and column.
+func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.URL.Query().Get("device"))
+	if err != nil {
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+
+	minutes := 24
+	if m := r.URL.Query().Get("minutes"); m != "" {
+		if v, err := strconv.Atoi(m); err == nil && v > 0 {
+			minutes = v
+		}
+	}
+	if minutes > maxHistoryMinutes {
+		minutes = maxHistoryMinutes
+	}
+
+	// Resolve the device (name + type) from the current config.
+	var device *DeviceConfig
+	cfg := s.currentConfig()
+	for i := range cfg.Devices {
+		if cfg.Devices[i].ID == id {
+			device = &cfg.Devices[i]
+			break
+		}
+	}
+	if device == nil {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// table/column are chosen from a fixed set by device type — never from user
+	// input — so interpolating them into the query is safe.
+	table, column := "battery_shunt_history", "current"
+	if device.DeviceType == DeviceTypeChargeController {
+		table, column = "charge_controller_history", "battery_current"
+	}
+
+	cutoff := time.Now().UTC().Add(-time.Duration(minutes) * time.Minute).Format(time.RFC3339)
+	query := fmt.Sprintf(
+		"SELECT ts, %s FROM %s WHERE device_id = ? AND ts >= ? ORDER BY ts ASC;",
+		column, table,
+	)
+
+	rows, err := s.db.Query(query, id, cutoff)
+	if err != nil {
+		s.logger.Error("dashboard: query history", "device", id, "error", err)
+		http.Error(w, "failed to read history", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	points := []historyPoint{}
+	for rows.Next() {
+		var ts string
+		var v sql.NullFloat64
+		if err := rows.Scan(&ts, &v); err != nil {
+			s.logger.Error("dashboard: scan history", "error", err)
+			http.Error(w, "failed to read history", http.StatusInternalServerError)
+			return
+		}
+		points = append(points, historyPoint{T: ts, V: nullFloat(v)})
+	}
+
+	writeJSON(w, historyResponse{
+		DeviceID: id,
+		Name:     device.Name,
+		Field:    "amperage",
+		Unit:     "A",
+		Minutes:  minutes,
+		Points:   points,
+	})
 }
 
 // loadForWrite reads the authoritative config from disk for a read-modify-write

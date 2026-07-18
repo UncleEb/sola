@@ -40,6 +40,30 @@ function setPanelVisible(panel, visible) {
     }
 }
 
+// Tag an element as a clickable link to a device's history page (or clear it,
+// e.g. a computed aggregate that has no single device to graph). A delegated
+// listener below turns the tag into navigation.
+function makeClickable(el, deviceId) {
+    if (!el) {
+        return;
+    }
+    if (deviceId !== null && deviceId !== undefined) {
+        el.classList.add("clickable");
+        el.dataset.deviceId = deviceId;
+    } else {
+        el.classList.remove("clickable");
+        delete el.dataset.deviceId;
+    }
+}
+
+// Clicking any device pane opens that device's history.
+document.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-device-id]");
+    if (el && el.dataset.deviceId) {
+        location.href = `/history?device=${el.dataset.deviceId}`;
+    }
+});
+
 // Demo mode (append ?demo to the URL) overlays synthetic charging data on top
 // of the real feed so the charger card can be seen "producing" after dark. It
 // never writes to the database and is clearly labelled, so it cannot be
@@ -165,6 +189,7 @@ function renderCharger(charger) {
     }
 
     setPanelVisible(els.chargerPanel, true);
+    makeClickable(els.chargerPanel, charger.id);
 
     renderFlow(charger);
 
@@ -273,6 +298,9 @@ function renderAggregate(shunts, charging, socLow) {
     }
 
     setPanelVisible(els.aggregatePanel, true);
+    // A real aggregate device links to its history; a computed pool has no
+    // single device to graph, so it is not clickable.
+    makeClickable(els.aggregatePanel, agg.id);
 
     if (!aggregateNodes) {
         els.aggregate.innerHTML = `
@@ -335,7 +363,7 @@ function bankCard(bank) {
     }
 
     return `
-        <div class="bank bank--${state}">
+        <div class="bank bank--${state} clickable" data-device-id="${bank.id}">
             <div class="bank__head">
                 <span class="bank__name">${bank.name}</span>
                 <span class="status-dot status-dot--${state}">${stateText}</span>
