@@ -35,13 +35,33 @@ body {
     line-height: 1.4;
 }
 
-/* Full-window starfield canvas, fixed behind all content and click-through. */
-#starfield {
+/* Full-window background canvas, fixed behind all content and click-through. */
+#background {
     position: fixed;
     inset: 0;
     z-index: -1;
     display: block;
     pointer-events: none;
+}
+
+/* Warpspeed reads better softened — echo the panels' frosted blur across the
+   whole background. Toggled on only for that mode (see background.js). */
+#background.background--blur {
+    filter: blur(8px);
+}
+
+/* A soft radial glow behind the animation: black core fading outward toward
+   --flow. It is the canvas's own background, so it sits under the drawn streaks
+   and stays viewport-centred. Off for "none" so that mode stays plain black. */
+#background.background--glow {
+    background: radial-gradient(circle at center, #000000 0%, #000000 25%, var(--flow) 170%);
+}
+
+/* Warpspeed is bright and busy; make the glass panels much more opaque there so
+   content stays readable. Overriding the tokens updates every glass surface. */
+body[data-background="warpspeed"] {
+    --glass-bg: rgba(23, 28, 36, 0.85);
+    --glass-bg-2: rgba(255, 255, 255, 0.07);
 }
 
 .topbar {

@@ -5,6 +5,7 @@
   "http_addr": ":8088",
   "debug": false,
   "soc_low_percent": 60,
+  "background": "starfield",
   "devices": [
     {
       "id": 2,

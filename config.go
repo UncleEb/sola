@@ -30,8 +30,18 @@ type Config struct {
 	HTTPAddr            string         `json:"http_addr"`       // dashboard listen address; defaults to defaultHTTPAddr
 	Debug               bool           `json:"debug"`           // when true, print each poll's readings to stdout
 	SOCLowPercent       int            `json:"soc_low_percent"` // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
+	Background          string         `json:"background"`      // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
 	Devices             []DeviceConfig `json:"devices"`
 }
+
+// Background options for the dashboard.
+const (
+	BackgroundNone      = "none"
+	BackgroundStarfield = "starfield"
+	BackgroundWarpspeed = "warpspeed"
+
+	defaultBackground = BackgroundStarfield
+)
 
 // defaultHTTPAddr is the dashboard listen address used when http_addr is
 // omitted from the config file.
@@ -91,6 +101,11 @@ func LoadConfig(path string) (Config, error) {
 	// An omitted (zero) low-SOC threshold falls back to the default.
 	if cfg.SOCLowPercent == 0 {
 		cfg.SOCLowPercent = defaultSOCLowPercent
+	}
+
+	// An omitted background falls back to the default (starfield).
+	if cfg.Background == "" {
+		cfg.Background = defaultBackground
 	}
 
 	return cfg, nil
@@ -163,6 +178,13 @@ func (c Config) validate() error {
 
 	if c.SOCLowPercent < 0 || c.SOCLowPercent > 100 {
 		return fmt.Errorf("soc_low_percent must be between 0 and 100, got %d", c.SOCLowPercent)
+	}
+
+	switch c.Background {
+	case "", BackgroundNone, BackgroundStarfield, BackgroundWarpspeed:
+	default:
+		return fmt.Errorf("background must be one of %q, %q, %q; got %q",
+			BackgroundNone, BackgroundStarfield, BackgroundWarpspeed, c.Background)
 	}
 
 	if len(c.Devices) == 0 {

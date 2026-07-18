@@ -18,7 +18,7 @@ import (
 // collector a single deployable binary: there are no loose files to lose or
 // keep in sync on the target machine.
 //
-//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/starfield.js web/devices.html web/devices.js web/device.html web/device.js
+//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/devices.html web/devices.js web/device.html web/device.js web/settings.html web/settings.js
 var webFiles embed.FS
 
 // dashboardServer serves the read-only web dashboard: the static page and a
@@ -107,6 +107,10 @@ func (s *dashboardServer) routes() http.Handler {
 	mux.HandleFunc("PUT /api/devices/{id}", s.handleUpdateDevice)
 	mux.HandleFunc("DELETE /api/devices/{id}", s.handleDeleteDevice)
 
+	// Display settings (currently just the background).
+	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
+
 	// Serve the embedded assets by name, mapping the clean page paths to their
 	// backing HTML files.
 	static, err := fs.Sub(webFiles, "web")
@@ -119,9 +123,10 @@ func (s *dashboardServer) routes() http.Handler {
 	fileServer := http.FileServer(http.FS(static))
 
 	pages := map[string]string{
-		"/":        "/solar_dashboard.html",
-		"/devices": "/devices.html",
-		"/device":  "/device.html",
+		"/":         "/solar_dashboard.html",
+		"/devices":  "/devices.html",
+		"/device":   "/device.html",
+		"/settings": "/settings.html",
 	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -522,6 +527,38 @@ func (s *dashboardServer) handleDeleteDevice(w http.ResponseWriter, r *http.Requ
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// settingsBody is the display-settings payload exchanged with the client.
+type settingsBody struct {
+	Background string `json:"background"`
+}
+
+func (s *dashboardServer) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, settingsBody{Background: s.currentConfig().Background})
+}
+
+func (s *dashboardServer) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var body settingsBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid settings JSON", http.StatusBadRequest)
+		return
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	cfg.Background = body.Background
+	if !s.persist(w, cfg) { // validate() rejects unknown background values
+		return
+	}
+
+	writeJSON(w, settingsBody{Background: cfg.Background})
 }
 
 // loadForWrite reads the authoritative config from disk for a read-modify-write
