@@ -23,9 +23,13 @@ Loads deployment settings from config.json, reloaded each poll.
 Handles graceful shutdown (Ctrl+C / SIGTERM), including the HTTP server.
 Uses structured logging (log/slog); per-poll readings print to the terminal
 only when "debug" is enabled in config.json.
-
-Historical storage does not exist yet: only the most recent reading per device
-is kept, so the dashboard is a live "now" view rather than a time-series.
+Captures periodic history snapshots (default every 15 seconds) into
+per-device-type SQLite tables, exposed as time-series graphs on a History page.
+Manages devices (add / edit / delete) from the web UI, written to config.json
+and applied live without a restart.
+Deploys as a single static binary or a small distroless Docker image; the
+Modbus link is non-fatal and self-healing, so the dashboard stays up across
+device reboots and network blips.
 
 Running with Docker
 
@@ -126,53 +130,22 @@ Log operational failures with useful context.
 
 Comments should explain why, not what.
 
-Future Roadmap
+Roadmap
 
-The rough order of development is expected to be:
+Phases 1–5 are substantially complete:
 
-Phase 1
-Stable Modbus polling
-Solar charger support
-Battery support
-Configuration cleanup
-Phase 2
+Phase 1 — Stable Modbus polling, solar charger and battery support, configuration cleanup. Done.
+Phase 2 — SQLite: current-status tables, per-device-type history, automatic schema creation. Done (formal migrations not yet needed).
+Phase 3 — Configuration: config.json with device definitions, poll interval, and per-device enable/disable, reloaded live each poll. Done (JSON rather than YAML).
+Phase 4 — HTTP API: current status (/api/status), history (/api/history), plus device and settings endpoints. Done.
+Phase 5 — Web UI: live dashboard, connection status, device management, and history graphs. Done.
 
-SQLite
+Likely next:
 
-Historical measurements
-Current status table
-Automatic schema creation
-Database migrations
-Phase 3
-
-Configuration
-
-YAML configuration file
-Device definitions
-Poll intervals
-Optional device enable/disable
-Phase 4
-
-HTTP API
-
-Potential endpoints:
-
-Current status
-Historical data
-Health
-Metrics
-Phase 5
-
-Web UI
-
-A lightweight operational interface for:
-
-Connection status
-Device health
-Diagnostics
-Configuration verification
-
-This is not intended to become a dashboard replacement.
+Retention / pruning for the history tables (currently keep-everything).
+Metrics and health endpoints for external monitoring.
+Support for non-Victron and additional data sources.
+Formal database migrations once the schema needs to change.
 
 AI Assistant Notes
 
