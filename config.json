@@ -2,14 +2,53 @@
   "modbus_url": "tcp://192.168.1.4:502",
   "poll_interval_seconds": 5,
   "database_path": "victron.db",
+  "http_addr": ":8088",
+  "debug": false,
   "soc_low_percent": 60,
   "devices": [
-    { "id": 1, "name": "All Banks",  "device_type": "shunt",             "modbus_unit": 239,  "aggregate": true },
-    { "id": 2, "name": "Bank 1",     "device_type": "shunt",             "modbus_unit": null },
-    { "id": 3, "name": "Bank 2",     "device_type": "shunt",             "modbus_unit": null },
-    { "id": 4, "name": "Bank 3",     "device_type": "shunt",             "modbus_unit": 235 },
-    { "id": 5, "name": "Bank 4",     "device_type": "shunt",             "modbus_unit": 233 },
-    { "id": 6, "name": "Bank 5",     "device_type": "shunt",             "modbus_unit": 236 },
-    { "id": 7, "name": "PV Charger", "device_type": "charge_controller", "modbus_unit": 238, "max_amperage": 0.1 }
+    {
+      "id": 2,
+      "name": "Bank 1",
+      "device_type": "shunt",
+      "modbus_unit": null
+    },
+    {
+      "id": 3,
+      "name": "Bank 2",
+      "device_type": "shunt",
+      "modbus_unit": null
+    },
+    {
+      "id": 4,
+      "name": "Bank 3",
+      "device_type": "shunt",
+      "modbus_unit": 235
+    },
+    {
+      "id": 5,
+      "name": "Bank 4",
+      "device_type": "shunt",
+      "modbus_unit": 233
+    },
+    {
+      "id": 8,
+      "name": "Bank 5",
+      "device_type": "shunt",
+      "modbus_unit": 236
+    },
+    {
+      "id": 9,
+      "name": "PV Charger",
+      "device_type": "charge_controller",
+      "modbus_unit": 238,
+      "max_amperage": 30
+    },
+    {
+      "id": 10,
+      "name": "All Banks",
+      "device_type": "shunt",
+      "modbus_unit": 239,
+      "aggregate": true
+    }
   ]
 }

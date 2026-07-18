@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Devices — Solar Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <canvas id="starfield"></canvas>
+
+    <header class="topbar">
+        <div class="topbar__left">
+            <h1>Solar Dashboard</h1>
+            <nav class="nav">
+                <a href="/" class="nav__link">Dashboard</a>
+                <a href="/devices" class="nav__link nav__link--active">Devices</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="panel">
+            <div class="devices-head">
+                <h2 class="panel__title">Registered Devices</h2>
+                <a href="/device" class="btn btn--primary">Add Device</a>
+            </div>
+            <div id="devices" class="device-list">
+                <p class="empty">Loading…</p>
+            </div>
+        </section>
+    </main>
+
+    <script src="starfield.js"></script>
+    <script src="devices.js"></script>
+</body>
+</html>

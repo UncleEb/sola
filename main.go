@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"reflect"
 	"syscall"
 	"time"
 
@@ -33,6 +34,13 @@ const (
 
 	bankStartAddress  = 258
 	bankRegisterCount = 4
+
+	// The System service (com.victronenergy.system) exposes the pool aggregate
+	// in a contiguous 840 block, with its own scaling: voltage /10 (not /100
+	// like the battery service), current /10 (signed), power in whole watts, and
+	// SOC as a whole percent (not /10). Calibrated against a known aggregate.
+	systemStartAddress  = 840
+	systemRegisterCount = 4
 )
 
 type AllBanksReading struct {
@@ -46,6 +54,11 @@ type BatteryBank struct {
 	ID     int
 	Name   string
 	UnitID int
+
+	// System marks the pool aggregate as sourced from the Venus System service
+	// (unit 100 register map) rather than a battery shunt. Only meaningful on
+	// the aggregate.
+	System bool
 
 	Voltage float64
 	Current float64
@@ -135,14 +148,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The device registry, connection, and database are established once at
-	// startup. Changing them requires a restart; only the poll interval is
-	// applied live (see the reload below).
+	// The connection and database are established once at startup; changing
+	// modbus_url, database_path, or http_addr requires a restart. The device
+	// registry, poll interval, and debug flag are all applied live (see the
+	// reload below).
 	aggregate, banks, charger := buildDevices(cfg)
 
 	// The dashboard reads the current-status tables the poll loop maintains. It
 	// uses the startup address; changing http_addr requires a restart.
-	dashboard := StartDashboard(logger, db, cfg)
+	dashboard := StartDashboard(logger, db, cfg, path)
 
 	pollAndStore(logger, db, client, aggregate, banks, charger, cfg.Debug)
 
@@ -179,6 +193,14 @@ func main() {
 						"poll interval changed",
 						"seconds", fresh.PollIntervalSeconds,
 					)
+				}
+
+				// Apply device add/edit/delete live. Rebuilding the registry
+				// here — in the poll goroutine that owns the Modbus client and
+				// device structs — keeps all device state single-threaded; the
+				// web API only ever rewrites config.json.
+				if !reflect.DeepEqual(fresh.Devices, current.Devices) {
+					aggregate, banks, charger = reconcileDevices(logger, db, current, fresh)
 				}
 
 				current = fresh
@@ -238,10 +260,57 @@ func buildDevices(cfg Config) (aggregate *BatteryBank, banks []BatteryBank, char
 				Name:   d.Name,
 				UnitID: unitOrDisabled(d.ModbusUnit),
 			}
+
+		case DeviceTypeSystem:
+			// The System service is the pool aggregate, read from its own
+			// register map (System: true).
+			aggregate = &BatteryBank{
+				ID:     d.ID,
+				Name:   d.Name,
+				UnitID: unitOrDisabled(d.ModbusUnit),
+				System: true,
+			}
 		}
 	}
 
 	return aggregate, banks, charger
+}
+
+// reconcileDevices applies a changed device list live: it deletes the status
+// rows of devices that were removed, refreshes/seeds identities for the current
+// set, and returns the rebuilt in-memory registry. It runs in the poll loop so
+// no other goroutine touches device state. Row/seed failures are logged but not
+// fatal — the collector keeps running with whatever succeeded.
+func reconcileDevices(logger *slog.Logger, db *sql.DB, old, fresh Config) (*BatteryBank, []BatteryBank, *SolarCharger) {
+	freshIDs := make(map[int]bool, len(fresh.Devices))
+	for _, d := range fresh.Devices {
+		freshIDs[d.ID] = true
+	}
+
+	for _, d := range old.Devices {
+		if freshIDs[d.ID] {
+			continue
+		}
+
+		table := tableBatteryShunt
+		if d.DeviceType == DeviceTypeChargeController {
+			table = tableChargeController
+		}
+
+		if err := deleteDevice(db, table, d.ID); err != nil {
+			logger.Error("failed to remove device row", "id", d.ID, "name", d.Name, "error", err)
+		} else {
+			logger.Info("device removed", "id", d.ID, "name", d.Name)
+		}
+	}
+
+	if err := seedDevices(db, fresh); err != nil {
+		logger.Error("failed to seed device registry after reload", "error", err)
+	}
+
+	logger.Info("device registry reloaded", "devices", len(fresh.Devices))
+
+	return buildDevices(fresh)
 }
 
 // unitOrDisabled converts a configured (nullable) Modbus unit into the
@@ -298,7 +367,14 @@ func pollAndStore(
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 
 	if aggregate != nil {
-		allBanks, err := readAllBanks(client, aggregate.UnitID)
+		// The aggregate reads from the System register map when sourced from the
+		// Venus System service, and from the battery-service map otherwise.
+		readAggregate := readAllBanks
+		if aggregate.System {
+			readAggregate = readSystem
+		}
+
+		allBanks, err := readAggregate(client, aggregate.UnitID)
 		if err != nil {
 			logger.Error(
 				"failed to read All Banks registers",
@@ -377,40 +453,45 @@ func pollAndStore(
 		}
 	}
 
-	if err := readSolarCharger(client, solarCharger); err != nil {
-		logger.Error(
-			"failed to read solar charger",
-			"charger", solarCharger.Name,
-			"unit_id", solarCharger.UnitID,
-			"error", err,
-		)
+	// A configuration may have no charge controller at all (it was never added,
+	// or was deleted live). Skip the read entirely rather than dereferencing a
+	// nil charger.
+	if solarCharger != nil {
+		if err := readSolarCharger(client, solarCharger); err != nil {
+			logger.Error(
+				"failed to read solar charger",
+				"charger", solarCharger.Name,
+				"unit_id", solarCharger.UnitID,
+				"error", err,
+			)
 
-		if err := markDeviceOffline(db, tableChargeController, solarCharger.ID); err != nil {
-			logger.Error("failed to mark charge controller offline", "error", err)
-		}
-	} else {
-		if debug {
-			printSolarCharger(*solarCharger)
-		}
+			if err := markDeviceOffline(db, tableChargeController, solarCharger.ID); err != nil {
+				logger.Error("failed to mark charge controller offline", "error", err)
+			}
+		} else {
+			if debug {
+				printSolarCharger(*solarCharger)
+			}
 
-		controller := ChargeControllerStatus{
-			ID:             solarCharger.ID,
-			ModbusID:       solarCharger.UnitID,
-			Name:           solarCharger.Name,
-			BatteryVoltage: solarCharger.BatteryVoltage,
-			BatteryCurrent: solarCharger.BatteryCurrent,
-			PVVoltage:      solarCharger.PVVoltage,
-			PVCurrent:      solarCharger.PVCurrent,
-			PVPower:        solarCharger.PVPower,
-			YieldToday:     solarCharger.YieldToday,
-			MaxPowerToday:  int(solarCharger.MaxPowerToday),
-			ChargeState:    int(solarCharger.ChargeState),
-			MPPMode:        int(solarCharger.MPPMode),
-			ErrorCode:      int(solarCharger.ErrorCode),
-		}
+			controller := ChargeControllerStatus{
+				ID:             solarCharger.ID,
+				ModbusID:       solarCharger.UnitID,
+				Name:           solarCharger.Name,
+				BatteryVoltage: solarCharger.BatteryVoltage,
+				BatteryCurrent: solarCharger.BatteryCurrent,
+				PVVoltage:      solarCharger.PVVoltage,
+				PVCurrent:      solarCharger.PVCurrent,
+				PVPower:        solarCharger.PVPower,
+				YieldToday:     solarCharger.YieldToday,
+				MaxPowerToday:  int(solarCharger.MaxPowerToday),
+				ChargeState:    int(solarCharger.ChargeState),
+				MPPMode:        int(solarCharger.MPPMode),
+				ErrorCode:      int(solarCharger.ErrorCode),
+			}
 
-		if err := upsertChargeController(db, controller, updatedAt); err != nil {
-			logger.Error("failed to store charge controller reading", "error", err)
+			if err := upsertChargeController(db, controller, updatedAt); err != nil {
+				logger.Error("failed to store charge controller reading", "error", err)
+			}
 		}
 	}
 
@@ -456,6 +537,28 @@ func readAllBanks(
 		// registers[2] is Modbus address 260 and is not used.
 		Current: float64(int16(registers[3])) * 0.1, // 261
 		SOC:     socRegisters[0] / 10,               // 266
+	}, nil
+}
+
+// readSystem reads the pool aggregate from the Venus System service. Its 840
+// block is contiguous, so a single read covers voltage/current/power/SOC. The
+// scaling differs from the battery service (see the systemStartAddress note).
+func readSystem(
+	client *modbus.ModbusClient,
+	unitID int,
+) (AllBanksReading, error) {
+	client.SetUnitId(uint8(unitID))
+
+	registers, err := readRegisterBlock(client, systemStartAddress, systemRegisterCount)
+	if err != nil {
+		return AllBanksReading{}, err
+	}
+
+	return AllBanksReading{
+		Voltage: float64(registers[0]) * 0.1,        // 840
+		Current: float64(int16(registers[1])) * 0.1, // 841
+		Power:   int16(registers[2]),                // 842
+		SOC:     registers[3],                       // 843 (whole percent)
 	}, nil
 }
 

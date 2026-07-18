@@ -22,12 +22,23 @@ const WAVE_FALLBACK_FRACTION = 0.6;
 const els = {
     connection: document.getElementById("connection"),
     connectionText: document.getElementById("connection-text"),
+    chargerPanel: document.getElementById("charger-panel"),
     charger: document.getElementById("charger"),
     chargerFlow: document.getElementById("charger-flow"),
+    aggregatePanel: document.getElementById("aggregate-panel"),
     aggregate: document.getElementById("aggregate"),
+    banksPanel: document.getElementById("banks-panel"),
     banks: document.getElementById("banks"),
     lastUpdate: document.getElementById("last-update"),
 };
+
+// Hide a whole panel when its section has nothing to show, rather than leaving
+// an empty placeholder.
+function setPanelVisible(panel, visible) {
+    if (panel) {
+        panel.hidden = !visible;
+    }
+}
 
 // Demo mode (append ?demo to the URL) overlays synthetic charging data on top
 // of the real feed so the charger card can be seen "producing" after dark. It
@@ -143,13 +154,17 @@ function renderFlow(charger) {
 }
 
 function renderCharger(charger) {
+    // No charge controller configured: hide the whole panel rather than show an
+    // empty placeholder. Reset the cached flow DOM so it rebuilds cleanly if a
+    // charger is added back later.
     if (!charger) {
+        setPanelVisible(els.chargerPanel, false);
         els.chargerFlow.innerHTML = "";
         flowNodes = null;
-        els.charger.className = "charger charger--empty";
-        els.charger.innerHTML = `<p class="empty">No charge controller registered.</p>`;
         return;
     }
+
+    setPanelVisible(els.chargerPanel, true);
 
     renderFlow(charger);
 
@@ -212,18 +227,52 @@ function socRingColor(soc, lowPercent) {
     return mixColor(SOC_COLOR_LOW, SOC_COLOR_HIGH, t);
 }
 
+// computeAggregate synthesises a pool reading from the individual (online)
+// shunts when no aggregate shunt is configured. Currents and powers of parallel
+// banks add; voltage is their mean. SOC is left null — an individual bank does
+// not report the pool state-of-charge, so it cannot be derived here (that needs
+// the aggregate shunt or the System service). Returns null if nothing to sum.
+function computeAggregate(shunts) {
+    const banks = (shunts || []).filter(
+        (s) => !s.aggregate && s.status === "online" && s.voltage !== null && s.voltage !== undefined,
+    );
+    if (banks.length === 0) {
+        return null;
+    }
+
+    let voltageSum = 0;
+    let current = 0;
+    let wattage = 0;
+    for (const b of banks) {
+        voltageSum += b.voltage;
+        if (b.current !== null && b.current !== undefined) {
+            current += b.current;
+        }
+        if (b.wattage !== null && b.wattage !== undefined) {
+            wattage += b.wattage;
+        }
+    }
+
+    return { voltage: voltageSum / banks.length, current, wattage, soc: null };
+}
+
 // aggregateNodes caches the battery-pool DOM once built. As with the flow wave,
 // rebuilding innerHTML every refresh would restart the SOC ring's charging
 // sweep animation, so it could never finish rising; instead build once, mutate.
 let aggregateNodes = null;
 
 function renderAggregate(shunts, charging, socLow) {
-    const agg = (shunts || []).find((s) => s.aggregate);
+    // Prefer a configured aggregate shunt (it carries real pool SOC); otherwise
+    // synthesise one from the individual shunts.
+    const agg = (shunts || []).find((s) => s.aggregate) || computeAggregate(shunts);
     if (!agg) {
-        els.aggregate.innerHTML = `<p class="empty">No aggregate shunt registered.</p>`;
+        // No aggregate device and no shunts to aggregate → nothing to show.
+        setPanelVisible(els.aggregatePanel, false);
         aggregateNodes = null;
         return;
     }
+
+    setPanelVisible(els.aggregatePanel, true);
 
     if (!aggregateNodes) {
         els.aggregate.innerHTML = `
@@ -248,13 +297,17 @@ function renderAggregate(shunts, charging, socLow) {
     }
 
     const soc = agg.soc;
+    const socKnown = soc !== null && soc !== undefined;
     const low = Number.isFinite(socLow) ? socLow : 50;
-    aggregateNodes.ring.style.setProperty("--soc", soc ?? 0);
+    aggregateNodes.ring.style.setProperty("--soc", socKnown ? soc : 0);
     aggregateNodes.ring.style.setProperty("--ring-color", socRingColor(soc, low));
-    // Toggling the class only when charging changes leaves a running sweep
-    // animation untouched, so it keeps looping smoothly.
+    // Toggling classes only on change leaves a running sweep animation
+    // untouched, so it keeps looping smoothly.
     aggregateNodes.ring.classList.toggle("soc-ring--charging", !!charging);
-    aggregateNodes.value.textContent = soc === null || soc === undefined ? "—" : `${soc}%`;
+    // Unknown SOC (a computed aggregate) shows a neutral ring and an em dash
+    // rather than a misleading empty arc.
+    aggregateNodes.ring.classList.toggle("soc-ring--unknown", !socKnown);
+    aggregateNodes.value.textContent = socKnown ? `${soc}%` : "—";
     aggregateNodes.voltage.textContent = fmt(agg.voltage, 1, "V");
     aggregateNodes.current.textContent = fmt(agg.current, 1, "A");
     aggregateNodes.power.textContent = fmt(agg.wattage, 0, "W");
@@ -263,10 +316,11 @@ function renderAggregate(shunts, charging, socLow) {
 function renderBanks(shunts) {
     const banks = (shunts || []).filter((s) => !s.aggregate);
     if (banks.length === 0) {
-        els.banks.innerHTML = `<p class="empty">No banks registered.</p>`;
+        setPanelVisible(els.banksPanel, false);
         return;
     }
 
+    setPanelVisible(els.banksPanel, true);
     els.banks.innerHTML = banks.map(bankCard).join("");
 }
 

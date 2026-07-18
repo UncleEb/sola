@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -16,41 +18,38 @@ import (
 // collector a single deployable binary: there are no loose files to lose or
 // keep in sync on the target machine.
 //
-//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/starfield.js
+//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/starfield.js web/devices.html web/devices.js web/device.html web/device.js
 var webFiles embed.FS
 
 // dashboardServer serves the read-only web dashboard: the static page and a
 // single JSON endpoint that reflects the current-status tables. It only reads
 // the database; all writes remain the poll loop's job.
 type dashboardServer struct {
-	db     *sql.DB
-	logger *slog.Logger
+	db         *sql.DB
+	logger     *slog.Logger
+	configPath string
 
-	// aggregateIDs marks which shunt rows are the pool aggregate rather than an
-	// individual bank. The database does not record this (it is a config fact),
-	// so the server carries it to label the JSON for the client.
-	aggregateIDs map[int]bool
+	// writeMu serialises config read-modify-write so two concurrent device
+	// edits cannot clobber each other.
+	writeMu sync.Mutex
 
-	// maxAmperage holds each charger's rated output amps, keyed by device ID.
-	// It is a config fact (not stored in the database) that the client uses to
-	// scale the flow animation. Chargers without a configured value are absent.
-	maxAmperage map[int]float64
-
-	// socLowPercent is the pool-wide "low" SOC threshold the client uses to
-	// colour the ring (config fact, not stored in the database).
-	socLowPercent int
+	// lastConfig caches the most recent successfully-loaded config. Config-
+	// derived facts (which shunt is the aggregate, charger max amps, the SOC
+	// threshold) are re-read from disk per request so live edits are reflected;
+	// this cache is the fallback if a read momentarily fails.
+	mu         sync.Mutex
+	lastConfig Config
 }
 
 // StartDashboard builds the HTTP server, begins listening in the background,
 // and returns it so the caller can shut it down. A failure to bind is fatal to
 // the dashboard but not to the collector, so it is logged rather than returned.
-func StartDashboard(logger *slog.Logger, db *sql.DB, cfg Config) *http.Server {
+func StartDashboard(logger *slog.Logger, db *sql.DB, cfg Config, configPath string) *http.Server {
 	handler := &dashboardServer{
-		db:            db,
-		logger:        logger,
-		aggregateIDs:  aggregateIDs(cfg),
-		maxAmperage:   chargerMaxAmperage(cfg),
-		socLowPercent: cfg.SOCLowPercent,
+		db:         db,
+		logger:     logger,
+		configPath: configPath,
+		lastConfig: cfg,
 	}
 
 	srv := &http.Server{
@@ -69,11 +68,13 @@ func StartDashboard(logger *slog.Logger, db *sql.DB, cfg Config) *http.Server {
 	return srv
 }
 
-// aggregateIDs returns the set of device IDs that are the pool aggregate shunt.
+// aggregateIDs returns the set of device IDs that provide the pool aggregate —
+// either an aggregate-flagged battery shunt or a System device (implicitly the
+// aggregate). The dashboard renders these in the Battery Pool pane.
 func aggregateIDs(cfg Config) map[int]bool {
 	ids := make(map[int]bool)
 	for _, d := range cfg.Devices {
-		if d.DeviceType == DeviceTypeShunt && d.Aggregate {
+		if d.DeviceType == DeviceTypeSystem || (d.DeviceType == DeviceTypeShunt && d.Aggregate) {
 			ids[d.ID] = true
 		}
 	}
@@ -99,7 +100,15 @@ func (s *dashboardServer) routes() http.Handler {
 
 	mux.HandleFunc("/api/status", s.handleStatus)
 
-	// Serve the embedded assets by name, mapping "/" to the dashboard page.
+	// Device registry CRUD. These only ever rewrite config.json; the poll loop
+	// applies the change (and deletes removed rows) on its next cycle.
+	mux.HandleFunc("GET /api/devices", s.handleListDevices)
+	mux.HandleFunc("POST /api/devices", s.handleCreateDevice)
+	mux.HandleFunc("PUT /api/devices/{id}", s.handleUpdateDevice)
+	mux.HandleFunc("DELETE /api/devices/{id}", s.handleDeleteDevice)
+
+	// Serve the embedded assets by name, mapping the clean page paths to their
+	// backing HTML files.
 	static, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		// The sub-filesystem is built from a compile-time embed path, so this
@@ -109,9 +118,15 @@ func (s *dashboardServer) routes() http.Handler {
 
 	fileServer := http.FileServer(http.FS(static))
 
+	pages := map[string]string{
+		"/":        "/solar_dashboard.html",
+		"/devices": "/devices.html",
+		"/device":  "/device.html",
+	}
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			r.URL.Path = "/solar_dashboard.html"
+		if file, ok := pages[r.URL.Path]; ok {
+			r.URL.Path = file
 		}
 
 		fileServer.ServeHTTP(w, r)
@@ -177,33 +192,58 @@ type statusResponse struct {
 }
 
 func (s *dashboardServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	shunts, err := s.queryShunts()
+	// Config-derived facts are read fresh each request so live device edits are
+	// reflected without restarting the server.
+	cfg := s.currentConfig()
+
+	shunts, err := s.queryShunts(aggregateIDs(cfg))
 	if err != nil {
 		s.logger.Error("dashboard: query shunts", "error", err)
 		http.Error(w, "failed to read battery status", http.StatusInternalServerError)
 		return
 	}
 
-	charger, err := s.queryCharger()
+	charger, err := s.queryCharger(chargerMaxAmperage(cfg))
 	if err != nil {
 		s.logger.Error("dashboard: query charger", "error", err)
 		http.Error(w, "failed to read charger status", http.StatusInternalServerError)
 		return
 	}
 
-	payload := statusResponse{
+	writeJSON(w, statusResponse{
 		Shunts:        shunts,
 		Charger:       charger,
-		SOCLowPercent: s.socLowPercent,
+		SOCLowPercent: cfg.SOCLowPercent,
+	})
+}
+
+// currentConfig returns the config from disk, falling back to the last good
+// copy if the read momentarily fails (e.g. caught mid-write, though writes are
+// atomic). Successful reads refresh the cache.
+func (s *dashboardServer) currentConfig() Config {
+	cfg, err := LoadConfig(s.configPath)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err != nil {
+		s.logger.Warn("dashboard: config read failed; using cached", "error", err)
+		return s.lastConfig
 	}
 
+	s.lastConfig = cfg
+	return cfg
+}
+
+// writeJSON encodes v as the JSON body of a 200 response.
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		s.logger.Error("dashboard: encode status", "error", err)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 	}
 }
 
-func (s *dashboardServer) queryShunts() ([]shuntJSON, error) {
+func (s *dashboardServer) queryShunts(aggregateIDs map[int]bool) ([]shuntJSON, error) {
 	const query = `
 SELECT id, modbus_id, name, voltage, current, wattage, soc, status, updated_at
 FROM battery_shunt_status
@@ -240,7 +280,7 @@ ORDER BY id;`
 			ID:        id,
 			ModbusID:  nullInt(modbusID),
 			Name:      name,
-			Aggregate: s.aggregateIDs[id],
+			Aggregate: aggregateIDs[id],
 			Voltage:   nullFloat(voltage),
 			Current:   nullFloat(current),
 			Wattage:   nullInt(wattage),
@@ -253,7 +293,7 @@ ORDER BY id;`
 	return shunts, rows.Err()
 }
 
-func (s *dashboardServer) queryCharger() (*chargerJSON, error) {
+func (s *dashboardServer) queryCharger(maxAmperage map[int]float64) (*chargerJSON, error) {
 	const query = `
 SELECT id, modbus_id, name, battery_voltage, battery_current,
        pv_voltage, pv_current, pv_power, yield_today, max_power_today,
@@ -293,9 +333,9 @@ LIMIT 1;`
 		return nil, fmt.Errorf("query charge controller: %w", err)
 	}
 
-	var maxAmperage *float64
-	if v, ok := s.maxAmperage[id]; ok {
-		maxAmperage = &v
+	var maxAmps *float64
+	if v, ok := maxAmperage[id]; ok {
+		maxAmps = &v
 	}
 
 	return &chargerJSON{
@@ -309,7 +349,7 @@ LIMIT 1;`
 		PVPower:         nullFloat(pvPower),
 		YieldToday:      nullFloat(yieldToday),
 		MaxPowerToday:   nullInt(maxPowerToday),
-		MaxAmperage:     maxAmperage,
+		MaxAmperage:     maxAmps,
 		ChargeState:     nullInt(chargeState),
 		ChargeStateName: decodedName(chargeState, chargeStateName),
 		MPPMode:         nullInt(mppMode),
@@ -356,6 +396,163 @@ func nullString(n sql.NullString) *string {
 	}
 
 	return &n.String
+}
+
+// ---- Device registry API -------------------------------------------------
+//
+// These handlers only ever rewrite config.json (atomically, serialised by
+// writeMu). The poll loop applies the change on its next cycle: it rebuilds the
+// in-memory registry and deletes the status rows of any removed devices. No
+// device/Modbus state is touched here, so there is nothing to race on.
+
+func (s *dashboardServer) handleListDevices(w http.ResponseWriter, r *http.Request) {
+	devices := s.currentConfig().Devices
+	if devices == nil {
+		devices = []DeviceConfig{}
+	}
+
+	writeJSON(w, devices)
+}
+
+func (s *dashboardServer) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
+	var d DeviceConfig
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		http.Error(w, "invalid device JSON", http.StatusBadRequest)
+		return
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	// The server assigns the ID so additions never collide.
+	d.ID = nextDeviceID(cfg)
+	cfg.Devices = append(cfg.Devices, d)
+
+	if !s.persist(w, cfg) {
+		return
+	}
+
+	writeJSON(w, d)
+}
+
+func (s *dashboardServer) handleUpdateDevice(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+
+	var d DeviceConfig
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		http.Error(w, "invalid device JSON", http.StatusBadRequest)
+		return
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	idx := -1
+	for i := range cfg.Devices {
+		if cfg.Devices[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+
+	// ID and device type are fixed on edit; only the mutable fields change.
+	// Keeping the type immutable avoids a device having to move status tables.
+	d.ID = id
+	d.DeviceType = cfg.Devices[idx].DeviceType
+	cfg.Devices[idx] = d
+
+	if !s.persist(w, cfg) {
+		return
+	}
+
+	writeJSON(w, d)
+}
+
+func (s *dashboardServer) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	kept := make([]DeviceConfig, 0, len(cfg.Devices))
+	found := false
+	for _, d := range cfg.Devices {
+		if d.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, d)
+	}
+	if !found {
+		http.Error(w, "device not found", http.StatusNotFound)
+		return
+	}
+	cfg.Devices = kept
+
+	// persist may reject deleting the last device (validate requires >= 1).
+	if !s.persist(w, cfg) {
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// loadForWrite reads the authoritative config from disk for a read-modify-write
+// cycle, writing a 500 and returning ok=false on failure.
+func (s *dashboardServer) loadForWrite(w http.ResponseWriter) (Config, bool) {
+	cfg, err := LoadConfig(s.configPath)
+	if err != nil {
+		s.logger.Error("dashboard: load config for write", "error", err)
+		http.Error(w, "failed to read configuration", http.StatusInternalServerError)
+		return Config{}, false
+	}
+
+	return cfg, true
+}
+
+// persist validates and atomically writes cfg, mapping a validation failure to
+// 400 (the client's fault, message shown in the form) and a write failure to
+// 500. Returns true only when the save succeeded.
+func (s *dashboardServer) persist(w http.ResponseWriter, cfg Config) bool {
+	if err := cfg.validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+
+	if err := SaveConfig(s.configPath, cfg); err != nil {
+		s.logger.Error("dashboard: save config", "error", err)
+		http.Error(w, "failed to save configuration", http.StatusInternalServerError)
+		return false
+	}
+
+	return true
 }
 
 // shutdownDashboard stops the HTTP server, giving in-flight requests a short

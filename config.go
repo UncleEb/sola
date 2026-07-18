@@ -11,6 +11,12 @@ import (
 const (
 	DeviceTypeShunt            = "shunt"
 	DeviceTypeChargeController = "charge_controller"
+	// DeviceTypeSystem is the Venus "System" service (unit 100 by default). It
+	// exposes the pool aggregate (voltage/current/power/SOC) that Venus computes
+	// across all batteries, using a different register map than a battery shunt.
+	// It is an alternative aggregate source for installs without a whole-bank
+	// shunt.
+	DeviceTypeSystem = "system"
 )
 
 // Config is the on-disk configuration, holding the deployment-specific values
@@ -42,10 +48,10 @@ const defaultSOCLowPercent = 50
 type DeviceConfig struct {
 	ID          int      `json:"id"`
 	Name        string   `json:"name"`
-	DeviceType  string   `json:"device_type"`  // DeviceTypeShunt | DeviceTypeChargeController
-	ModbusUnit  *int     `json:"modbus_unit"`  // nil = no exposed port
-	Aggregate   bool     `json:"aggregate"`    // shunt that owns pool SOC
-	MaxAmperage *float64 `json:"max_amperage"` // charge_controller only: rated output amps, used to scale the dashboard flow animation
+	DeviceType  string   `json:"device_type"`            // DeviceTypeShunt | DeviceTypeChargeController
+	ModbusUnit  *int     `json:"modbus_unit"`            // nil = no exposed port
+	Aggregate   bool     `json:"aggregate,omitempty"`    // shunt that owns pool SOC
+	MaxAmperage *float64 `json:"max_amperage,omitempty"` // charge_controller only: rated output amps, used to scale the dashboard flow animation
 }
 
 // configPath returns the path to config.json. The directory is overridable via
@@ -88,6 +94,56 @@ func LoadConfig(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// SaveConfig validates cfg and writes it to path atomically (temp file in the
+// same directory, then rename) so a concurrent reader — the poll loop reloads
+// config every cycle — never observes a half-written file. It refuses to write
+// a config that would not pass validation, so the file on disk always loads.
+func SaveConfig(path string, cfg Config) error {
+	if err := cfg.validate(); err != nil {
+		return fmt.Errorf("refusing to save invalid config: %w", err)
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	data = append(data, '\n')
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // harmless no-op once renamed
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+
+	return nil
+}
+
+// nextDeviceID returns an unused device ID (one past the current maximum), so
+// added devices never collide with existing ones.
+func nextDeviceID(cfg Config) int {
+	max := 0
+	for _, d := range cfg.Devices {
+		if d.ID > max {
+			max = d.ID
+		}
+	}
+
+	return max + 1
 }
 
 // validate rejects configurations that could not run correctly, so problems
@@ -141,13 +197,23 @@ func (c Config) validate() error {
 			if d.MaxAmperage != nil && *d.MaxAmperage <= 0 {
 				return fmt.Errorf("device %d: max_amperage must be positive, got %g", d.ID, *d.MaxAmperage)
 			}
+		case DeviceTypeSystem:
+			// A system device is always the pool aggregate, so it counts toward
+			// the single-aggregate limit and does not take the aggregate flag.
+			aggregates++
+			if d.Aggregate {
+				return fmt.Errorf("device %d: the aggregate flag is implicit for %q; do not set it", d.ID, DeviceTypeSystem)
+			}
+			if d.MaxAmperage != nil {
+				return fmt.Errorf("device %d: max_amperage is only valid for %q", d.ID, DeviceTypeChargeController)
+			}
 		default:
 			return fmt.Errorf("device %d: unknown device_type %q", d.ID, d.DeviceType)
 		}
 	}
 
 	if aggregates > 1 {
-		return fmt.Errorf("at most one aggregate shunt is allowed, found %d", aggregates)
+		return fmt.Errorf("at most one aggregate source is allowed (aggregate shunt or system), found %d", aggregates)
 	}
 
 	return nil

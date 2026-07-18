@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Device — Solar Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <canvas id="starfield"></canvas>
+
+    <header class="topbar">
+        <div class="topbar__left">
+            <h1>Solar Dashboard</h1>
+            <nav class="nav">
+                <a href="/" class="nav__link">Dashboard</a>
+                <a href="/devices" class="nav__link nav__link--active">Devices</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="panel">
+            <h2 class="panel__title" id="form-title">Add Device</h2>
+
+            <form id="device-form" class="form">
+                <label class="field">
+                    <span class="field__label">Type</span>
+                    <select id="device_type" class="field__input">
+                        <option value="shunt">Battery Shunt</option>
+                        <option value="charge_controller">Charge Controller</option>
+                        <option value="system">System (pool aggregate)</option>
+                    </select>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">Name</span>
+                    <input id="name" class="field__input" type="text" maxlength="60" required>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">Modbus Unit ID</span>
+                    <input id="modbus_unit" class="field__input" type="number" min="0" max="255"
+                           placeholder="Leave blank if not connected">
+                    <span class="field__hint">Blank = no Modbus port (e.g. a disconnected bank).</span>
+                </label>
+
+                <label class="field-check field--shunt">
+                    <input id="aggregate" type="checkbox">
+                    <span>Aggregate — owns the pool state-of-charge (only one shunt may be the aggregate)</span>
+                </label>
+
+                <label class="field field--charger">
+                    <span class="field__label">Max Amperage</span>
+                    <input id="max_amperage" class="field__input" type="number" min="0" step="0.1"
+                           placeholder="e.g. 30">
+                    <span class="field__hint">Rated output amps; scales the dashboard flow animation.</span>
+                </label>
+
+                <div id="form-error" class="form__error" hidden></div>
+
+                <div class="form__actions">
+                    <a href="/devices" class="btn">Cancel</a>
+                    <button type="submit" class="btn btn--primary" id="submit-btn">Add Device</button>
+                </div>
+            </form>
+        </section>
+    </main>
+
+    <script src="starfield.js"></script>
+    <script src="device.js"></script>
+</body>
+</html>

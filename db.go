@@ -193,17 +193,34 @@ ON CONFLICT(id) DO UPDATE SET
 	return nil
 }
 
-// seedDevice inserts a registered device's identity row if it does not already
-// exist, leaving status at its 'offline' default and reading fields NULL. It
-// never overwrites an existing row, so it is safe to run on every startup.
+// seedDevice registers a device's identity row. A new device is inserted with
+// status at its 'offline' default and reading fields NULL. An existing row has
+// only its identity (name, modbus_id) refreshed — status and readings are left
+// intact — so live config edits (a rename, a Modbus-unit change) are reflected
+// even for devices that are never polled, such as disconnected banks.
 // modbusID is NULL for a device with no exposed Modbus port.
 func seedDevice(db *sql.DB, table string, id int, modbusID sql.NullInt64, name string) error {
 	query := fmt.Sprintf(`
 INSERT INTO %s (id, modbus_id, name) VALUES (?, ?, ?)
-ON CONFLICT(id) DO NOTHING;`, table)
+ON CONFLICT(id) DO UPDATE SET
+    name      = excluded.name,
+    modbus_id = excluded.modbus_id;`, table)
 
 	if _, err := db.Exec(query, id, modbusID, name); err != nil {
 		return fmt.Errorf("seed device %d in %s: %w", id, table, err)
+	}
+
+	return nil
+}
+
+// deleteDevice removes a device's status row entirely. It is used when a device
+// is removed from the configuration so it disappears from the dashboard rather
+// than lingering with its last reading.
+func deleteDevice(db *sql.DB, table string, id int) error {
+	query := fmt.Sprintf(`DELETE FROM %s WHERE id = ?;`, table)
+
+	if _, err := db.Exec(query, id); err != nil {
+		return fmt.Errorf("delete device %d from %s: %w", id, table, err)
 	}
 
 	return nil

@@ -24,6 +24,10 @@
 
 * { box-sizing: border-box; }
 
+/* Ensure [hidden] wins over element display rules (e.g. .field { display: grid }
+   would otherwise keep a hidden field visible). */
+[hidden] { display: none !important; }
+
 body {
     margin: 0;
     background: var(--bg);
@@ -55,6 +59,38 @@ body {
     margin: 0;
     font-size: 1.25rem;
     font-weight: 600;
+}
+
+.topbar__left {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+}
+
+.nav {
+    display: flex;
+    gap: 0.4rem;
+}
+
+.nav__link {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 0.35rem 0.8rem;
+    border-radius: 8px;
+    border: 1px solid transparent;
+}
+
+.nav__link:hover {
+    color: var(--text);
+    background: var(--glass-bg-2);
+}
+
+.nav__link--active {
+    color: var(--text);
+    background: var(--glass-bg-2);
+    border-color: var(--glass-border);
 }
 
 /* Connection / staleness pill */
@@ -268,6 +304,16 @@ main {
     position: relative;
 }
 
+/* Unknown SOC (a computed aggregate with no pool SOC): a uniform faint ring and
+   a muted value, instead of a coloured arc that would imply a real percentage. */
+.soc-ring--unknown::before {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.soc-ring--unknown .soc-ring__value {
+    color: var(--muted);
+}
+
 .soc-ring__text {
     text-align: center;
 }
@@ -379,4 +425,206 @@ main {
     padding: 1rem;
     color: var(--muted);
     font-size: 0.8rem;
+}
+
+/* ---- Buttons ---- */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--text);
+    text-decoration: none;
+    cursor: pointer;
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+}
+
+.btn:hover {
+    border-color: var(--flow);
+}
+
+.btn--primary {
+    color: var(--flow);
+    background: rgba(76, 194, 255, 0.14);
+    border-color: var(--flow);
+}
+
+.btn--danger {
+    color: var(--bad);
+    background: rgba(248, 81, 73, 0.12);
+    border-color: rgba(248, 81, 73, 0.5);
+}
+
+.btn--danger:hover {
+    border-color: var(--bad);
+}
+
+/* Square icon-only button (e.g. the row delete trash can). */
+.icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.4rem;
+    border-radius: 8px;
+    line-height: 0;
+    cursor: pointer;
+    color: var(--muted);
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+}
+
+.icon-btn svg {
+    display: block;
+}
+
+.icon-btn--danger:hover {
+    color: var(--bad);
+    border-color: var(--bad);
+}
+
+/* ---- Devices list ---- */
+.devices-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.devices-head .panel__title {
+    margin: 0;
+}
+
+.device-list {
+    display: grid;
+    gap: 0.6rem;
+}
+
+.device-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 1rem;
+    border-radius: 10px;
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+    cursor: pointer;
+}
+
+.device-row:hover {
+    border-color: var(--flow);
+}
+
+.device-row__main {
+    display: grid;
+    gap: 0.2rem;
+}
+
+.device-row__name {
+    font-weight: 600;
+}
+
+.device-row__meta {
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+/* ---- Device form ---- */
+.form {
+    display: grid;
+    gap: 1.1rem;
+    max-width: 460px;
+}
+
+.field {
+    display: grid;
+    gap: 0.3rem;
+}
+
+.field__label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+}
+
+.field__input {
+    padding: 0.5rem 0.65rem;
+    border-radius: 8px;
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+    color: var(--text);
+    font-size: 0.95rem;
+    font-family: inherit;
+}
+
+.field__input:focus {
+    outline: none;
+    border-color: var(--flow);
+}
+
+/* Replace the native select chrome (white arrow button) with a themed chevron,
+   and theme the option list so it isn't the OS default white/blue. Note: the
+   open option popup is drawn by the OS on some platforms and may still show
+   native colours there — only a fully custom dropdown avoids that entirely. */
+select.field__input {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 2rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4.5l4 4 4-4' fill='none' stroke='%238b98a9' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.7rem center;
+    background-size: 0.7rem;
+}
+
+.field__input option {
+    background: var(--panel);
+    color: var(--text);
+}
+
+/* Chrome forces a light background on autofilled inputs that plain background
+   can't override; mask it with an opaque inset shadow and keep the text light. */
+.field__input:-webkit-autofill,
+.field__input:-webkit-autofill:hover,
+.field__input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--text);
+    -webkit-box-shadow: 0 0 0 1000px var(--panel) inset;
+    caret-color: var(--text);
+    /* Delay the autofill background swap effectively forever. */
+    transition: background-color 100000s ease-in-out 0s;
+}
+
+.field__hint {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+.field-check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+}
+
+.form__error {
+    padding: 0.6rem 0.8rem;
+    border-radius: 8px;
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+}
+
+.form__actions {
+    display: flex;
+    gap: 0.6rem;
+    justify-content: flex-end;
 }
