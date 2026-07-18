@@ -20,6 +20,9 @@
     --glass-border: rgba(255, 255, 255, 0.09);
     --glass-blur: 6px;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    /* Render native controls (date/time pickers and their calendar/clock
+       popups, scrollbars) in dark theme instead of the default white. */
+    color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -50,11 +53,16 @@ body {
     filter: blur(8px);
 }
 
-/* A soft radial glow behind the animation: black core fading outward toward
-   --flow. It is the canvas's own background, so it sits under the drawn streaks
-   and stays viewport-centred. Off for "none" so that mode stays plain black. */
+/* A soft radial glow behind the animation: a large black core fading outward
+   toward a dimmed --flow. It is the canvas's own background, so it sits under
+   the drawn streaks and stays viewport-centred. Off for "none" (plain black). */
 #background.background--glow {
-    background: radial-gradient(circle at center, #000000 0%, #000000 25%, var(--flow) 170%);
+    background: radial-gradient(
+        circle at center,
+        #000000 0%,
+        #000000 40%,
+        color-mix(in srgb, var(--flow) 65%, #000000) 175%
+    );
 }
 
 /* Warpspeed is bright and busy; make the glass panels much more opaque there so
@@ -458,14 +466,51 @@ main {
     font-size: 0.8rem;
 }
 
-/* ---- History chart ---- */
+/* ---- History charts ---- */
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.controls .field {
+    gap: 0.25rem;
+}
+
+/* On narrow screens the wrapping row gets chaotic; stack each control on its
+   own full-width line. Desktop layout is unaffected. */
+@media (max-width: 640px) {
+    .controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .controls .field {
+        width: 100%;
+    }
+}
+
+.chart-block {
+    margin-top: 1.5rem;
+}
+
+.chart-block__title {
+    margin: 0 0 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
 .chart-wrap {
     position: relative;
     width: 100%;
-    height: 360px;
+    height: 240px;
 }
 
-#chart {
+.chart-wrap canvas {
     display: block;
     width: 100%;
     height: 100%;

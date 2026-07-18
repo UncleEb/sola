@@ -568,48 +568,87 @@ func (s *dashboardServer) handleUpdateSettings(w http.ResponseWriter, r *http.Re
 	writeJSON(w, settingsBody{Background: cfg.Background})
 }
 
-// historyPoint is one sample: timestamp and value (null if the reading was
-// missing at that snapshot).
-type historyPoint struct {
-	T string   `json:"t"`
-	V *float64 `json:"v"`
+// seriesDef describes one plottable metric. column is the SQL column it maps to
+// and stays unexported so it is not serialised to the client.
+type seriesDef struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	Unit   string `json:"unit"`
+	column string
 }
 
 type historyResponse struct {
-	DeviceID int            `json:"device_id"`
-	Name     string         `json:"name"`
-	Field    string         `json:"field"`
-	Unit     string         `json:"unit"`
-	Minutes  int            `json:"minutes"`
-	Points   []historyPoint `json:"points"`
+	DeviceID int              `json:"device_id"`
+	Name     string           `json:"name"`
+	Start    string           `json:"start"`
+	End      string           `json:"end"`
+	Unit     string           `json:"unit"`
+	Series   []seriesDef      `json:"series"`
+	Buckets  []map[string]any `json:"buckets"`
 }
 
-const maxHistoryMinutes = 7 * 24 * 60 // one week
+// historyBucketExpr maps a time-unit name to the SQLite strftime expression that
+// buckets a row's ts into that unit. The set is fixed (not user text), so the
+// chosen expression is safe to interpolate into the query.
+func historyBucketExpr(unit string) (string, bool) {
+	switch unit {
+	case "minutes":
+		return "strftime('%Y-%m-%dT%H:%M', ts)", true
+	case "hours":
+		return "strftime('%Y-%m-%dT%H', ts)", true
+	case "days":
+		return "strftime('%Y-%m-%d', ts)", true
+	case "weeks":
+		return "strftime('%Y-%W', ts)", true
+	case "months":
+		return "strftime('%Y-%m', ts)", true
+	default:
+		return "", false
+	}
+}
 
-// handleHistory returns a device's measurement series over the last N minutes.
-// For now the series is amperage: a shunt/system reports its current, a charge
-// controller its battery current. The device's type (from config) selects the
-// history table and column.
+// handleHistory returns a device's metrics over [start, end], averaged into
+// buckets of the requested time unit. Which metrics come back depends on the
+// device type: shunts/system report amperage/voltage/wattage (plus SOC when they
+// own the pool SOC); a charge controller reports amperage for now.
 func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.URL.Query().Get("device"))
+	q := r.URL.Query()
+
+	id, err := strconv.Atoi(q.Get("device"))
 	if err != nil {
 		http.Error(w, "invalid device id", http.StatusBadRequest)
 		return
 	}
 
-	minutes := 24
-	if m := r.URL.Query().Get("minutes"); m != "" {
-		if v, err := strconv.Atoi(m); err == nil && v > 0 {
-			minutes = v
-		}
+	unit := q.Get("unit")
+	if unit == "" {
+		unit = "hours"
 	}
-	if minutes > maxHistoryMinutes {
-		minutes = maxHistoryMinutes
+	bucketExpr, ok := historyBucketExpr(unit)
+	if !ok {
+		http.Error(w, "unit must be one of minutes, hours, days, weeks, months", http.StatusBadRequest)
+		return
 	}
 
-	// Resolve the device (name + type) from the current config.
-	var device *DeviceConfig
+	// Range defaults to the last 24 hours. Parsed then reformatted to canonical
+	// RFC3339 (no fractional seconds) so it compares cleanly against stored ts.
+	now := time.Now().UTC()
+	start, err := parseHistoryTime(q.Get("start"), now.Add(-24*time.Hour))
+	if err != nil {
+		http.Error(w, "invalid start time", http.StatusBadRequest)
+		return
+	}
+	end, err := parseHistoryTime(q.Get("end"), now)
+	if err != nil {
+		http.Error(w, "invalid end time", http.StatusBadRequest)
+		return
+	}
+	startStr := start.UTC().Format(time.RFC3339)
+	endStr := end.UTC().Format(time.RFC3339)
+
+	// Resolve the device and its plottable metrics.
 	cfg := s.currentConfig()
+	var device *DeviceConfig
 	for i := range cfg.Devices {
 		if cfg.Devices[i].ID == id {
 			device = &cfg.Devices[i]
@@ -621,20 +660,34 @@ func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// table/column are chosen from a fixed set by device type — never from user
-	// input — so interpolating them into the query is safe.
-	table, column := "battery_shunt_history", "current"
+	table := "battery_shunt_history"
+	var series []seriesDef
 	if device.DeviceType == DeviceTypeChargeController {
-		table, column = "charge_controller_history", "battery_current"
+		table = "charge_controller_history"
+		series = []seriesDef{{Key: "amperage", Label: "Amperage", Unit: "A", column: "battery_current"}}
+	} else {
+		series = []seriesDef{
+			{Key: "amperage", Label: "Amperage", Unit: "A", column: "current"},
+			{Key: "voltage", Label: "Voltage", Unit: "V", column: "voltage"},
+			{Key: "wattage", Label: "Power", Unit: "W", column: "wattage"},
+		}
+		// SOC only where the device owns the pool state of charge.
+		if aggregateIDs(cfg)[id] {
+			series = append(series, seriesDef{Key: "soc", Label: "State of Charge", Unit: "%", column: "soc"})
+		}
 	}
 
-	cutoff := time.Now().UTC().Add(-time.Duration(minutes) * time.Minute).Format(time.RFC3339)
+	// One row per bucket: its first timestamp plus the average of each metric.
+	selects := "MIN(ts) AS t"
+	for _, sd := range series {
+		selects += ", AVG(" + sd.column + ")"
+	}
 	query := fmt.Sprintf(
-		"SELECT ts, %s FROM %s WHERE device_id = ? AND ts >= ? ORDER BY ts ASC;",
-		column, table,
+		"SELECT %s FROM %s WHERE device_id = ? AND ts >= ? AND ts <= ? GROUP BY %s ORDER BY t;",
+		selects, table, bucketExpr,
 	)
 
-	rows, err := s.db.Query(query, id, cutoff)
+	rows, err := s.db.Query(query, id, startStr, endStr)
 	if err != nil {
 		s.logger.Error("dashboard: query history", "device", id, "error", err)
 		http.Error(w, "failed to read history", http.StatusInternalServerError)
@@ -642,26 +695,46 @@ func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) 
 	}
 	defer rows.Close()
 
-	points := []historyPoint{}
+	buckets := []map[string]any{}
 	for rows.Next() {
-		var ts string
-		var v sql.NullFloat64
-		if err := rows.Scan(&ts, &v); err != nil {
+		var t string
+		vals := make([]sql.NullFloat64, len(series))
+		dest := make([]any, 0, len(series)+1)
+		dest = append(dest, &t)
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
 			s.logger.Error("dashboard: scan history", "error", err)
 			http.Error(w, "failed to read history", http.StatusInternalServerError)
 			return
 		}
-		points = append(points, historyPoint{T: ts, V: nullFloat(v)})
+
+		bucket := map[string]any{"t": t}
+		for i, sd := range series {
+			bucket[sd.Key] = nullFloat(vals[i])
+		}
+		buckets = append(buckets, bucket)
 	}
 
 	writeJSON(w, historyResponse{
 		DeviceID: id,
 		Name:     device.Name,
-		Field:    "amperage",
-		Unit:     "A",
-		Minutes:  minutes,
-		Points:   points,
+		Start:    startStr,
+		End:      endStr,
+		Unit:     unit,
+		Series:   series,
+		Buckets:  buckets,
 	})
+}
+
+// parseHistoryTime parses an RFC3339 timestamp, returning fallback when the
+// value is empty. It accepts fractional seconds (the browser sends them).
+func parseHistoryTime(value string, fallback time.Time) (time.Time, error) {
+	if value == "" {
+		return fallback, nil
+	}
+	return time.Parse(time.RFC3339, value)
 }
 
 // loadForWrite reads the authoritative config from disk for a read-modify-write

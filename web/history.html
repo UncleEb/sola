@@ -26,10 +26,37 @@
                 <h2 class="panel__title" id="history-title">History</h2>
                 <a href="/" class="btn">← Back</a>
             </div>
-            <div class="chart-wrap">
-                <canvas id="chart"></canvas>
-                <p id="chart-empty" class="empty" hidden>No history recorded yet for this device.</p>
+
+            <div class="controls">
+                <label class="field">
+                    <span class="field__label">Time unit</span>
+                    <select id="unit" class="field__input">
+                        <option value="months">Months</option>
+                        <option value="weeks">Weeks</option>
+                        <option value="days">Days</option>
+                        <option value="hours">Hours</option>
+                        <option value="minutes">Minutes</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span class="field__label">Start date</span>
+                    <input type="date" id="start-date" class="field__input">
+                </label>
+                <label class="field">
+                    <span class="field__label">Start time</span>
+                    <input type="time" id="start-time" class="field__input">
+                </label>
+                <label class="field">
+                    <span class="field__label">End date</span>
+                    <input type="date" id="end-date" class="field__input">
+                </label>
+                <label class="field">
+                    <span class="field__label">End time</span>
+                    <input type="time" id="end-time" class="field__input">
+                </label>
             </div>
+
+            <div id="charts"></div>
         </section>
     </main>
 
