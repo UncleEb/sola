@@ -14,8 +14,35 @@ const els = {
     startTime: document.getElementById("start-time"),
     endDate: document.getElementById("end-date"),
     endTime: document.getElementById("end-time"),
+    tiles: document.getElementById("tiles"),
     charts: document.getElementById("charts"),
 };
+
+// Render the headline "max over range" tiles (yield / peak power at fine units).
+function renderTiles(tiles) {
+    els.tiles.textContent = "";
+    if (!tiles || !tiles.length) {
+        els.tiles.hidden = true;
+        return;
+    }
+    els.tiles.hidden = false;
+    for (const t of tiles) {
+        const value =
+            t.value === null || t.value === undefined
+                ? "—"
+                : `${Number.isInteger(t.value) ? t.value : t.value.toFixed(2)} ${t.unit}`;
+        const tile = document.createElement("div");
+        tile.className = "tile";
+        const v = document.createElement("div");
+        v.className = "tile__value";
+        v.textContent = value;
+        const label = document.createElement("div");
+        label.className = "tile__label";
+        label.textContent = t.label;
+        tile.append(v, label);
+        els.tiles.appendChild(tile);
+    }
+}
 
 const rootStyle = getComputedStyle(document.documentElement);
 const cssVar = (name, fallback) => rootStyle.getPropertyValue(name).trim() || fallback;
@@ -162,11 +189,13 @@ function makeChart() {
 
     let points = []; // {t (ms), v}
     let unitLabel = "";
+    let labels = null; // enum code(string) -> name; null for numeric series
     let start = 0;
     let end = 0;
     let plotted = [];
     let hoverIndex = -1;
     let geom = null;
+    let fmtValue = (v) => String(v); // tooltip/label formatter, set per draw
 
     function roundRect(x, y, w, h, r) {
         ctx.beginPath();
@@ -191,64 +220,94 @@ function makeChart() {
             return;
         }
 
-        const m = { l: 52, r: 16, t: 12, b: 26 };
-        const plotW = W - m.l - m.r;
-        const plotH = H - m.t - m.b;
-
         const t0 = start;
         const t1 = end;
         const span = Math.max(1, t1 - t0);
 
-        let dataMin = Infinity;
-        let dataMax = -Infinity;
-        for (const p of points) {
-            if (p.v === null || p.v === undefined) {
-                continue;
-            }
-            dataMin = Math.min(dataMin, p.v);
-            dataMax = Math.max(dataMax, p.v);
-        }
-        // Frame to the data (not forced to zero) with a little headroom, then
-        // round the bounds/step to nice numbers so the axis reads cleanly and a
-        // flat line isn't pinned to an edge.
-        let lo;
-        let hi;
-        if (dataMin === dataMax) {
-            const p = Math.max(Math.abs(dataMin) * 0.1, 0.5);
-            lo = dataMin - p;
-            hi = dataMax + p;
+        // Build the Y scale. Enum series use a categorical axis (named ticks,
+        // even spacing, stepped line); numeric series use a nice-number scale.
+        // yTicks hold a fraction (0 = bottom, 1 = top) and text; fracOf maps a
+        // data value to that fraction.
+        let yTicks;
+        let fracOf;
+        let stepped = false;
+        let crossesZero = false;
+
+        if (labels) {
+            const codes = Object.keys(labels)
+                .map(Number)
+                .sort((a, b) => a - b);
+            const lo = -0.5;
+            const hi = codes.length - 1 + 0.5;
+            fracOf = (code) => (codes.indexOf(code) - lo) / (hi - lo);
+            yTicks = codes.map((c) => ({ frac: fracOf(c), text: labels[String(c)] || String(c) }));
+            stepped = true;
+            fmtValue = (code) => labels[String(code)] || String(code);
         } else {
-            const p = (dataMax - dataMin) * 0.1;
-            lo = dataMin - p;
-            hi = dataMax + p;
+            let dataMin = Infinity;
+            let dataMax = -Infinity;
+            for (const p of points) {
+                if (p.v === null || p.v === undefined) {
+                    continue;
+                }
+                dataMin = Math.min(dataMin, p.v);
+                dataMax = Math.max(dataMax, p.v);
+            }
+            // Frame to the data (not forced to zero) with headroom, then round to
+            // nice numbers so the axis reads cleanly and a flat line isn't pinned.
+            let lo;
+            let hi;
+            if (dataMin === dataMax) {
+                const p = Math.max(Math.abs(dataMin) * 0.1, 0.5);
+                lo = dataMin - p;
+                hi = dataMax + p;
+            } else {
+                const p = (dataMax - dataMin) * 0.1;
+                lo = dataMin - p;
+                hi = dataMax + p;
+            }
+            const scale = niceScale(lo, hi, 4);
+            const vmin = scale.min;
+            const vmax = scale.max;
+            const vdecimals = Math.max(0, -Math.floor(Math.log10(scale.step)));
+            fracOf = (v) => (v - vmin) / (vmax - vmin);
+            yTicks = [];
+            const nt = Math.round((vmax - vmin) / scale.step);
+            for (let i = 0; i <= nt; i++) {
+                const v = vmin + i * scale.step;
+                yTicks.push({ frac: fracOf(v), text: v.toFixed(vdecimals) });
+            }
+            crossesZero = vmin < 0 && vmax > 0;
+            fmtValue = (v) => (unitLabel ? `${v.toFixed(2)} ${unitLabel}` : `${v}`);
         }
-        const scale = niceScale(lo, hi, 4);
-        const vmin = scale.min;
-        const vmax = scale.max;
-        const vstep = scale.step;
-        const vdecimals = Math.max(0, -Math.floor(Math.log10(vstep)));
+
+        // Left margin sized to the widest Y label (enum names can be long).
+        ctx.font = "11px system-ui, -apple-system, sans-serif";
+        let maxLabelW = 0;
+        for (const tk of yTicks) {
+            maxLabelW = Math.max(maxLabelW, ctx.measureText(tk.text).width);
+        }
+        const m = { l: Math.max(44, Math.ceil(maxLabelW) + 14), r: 16, t: 12, b: 26 };
+        const plotW = W - m.l - m.r;
+        const plotH = H - m.t - m.b;
 
         const xOf = (t) => m.l + ((t - t0) / span) * plotW;
-        const yOf = (v) => m.t + (1 - (v - vmin) / (vmax - vmin)) * plotH;
+        const yOf = (frac) => m.t + (1 - frac) * plotH;
         geom = { m, plotW, plotH, W };
 
-        ctx.font = "11px system-ui, -apple-system, sans-serif";
+        // Y grid + labels.
         ctx.lineWidth = 1;
-
-        // Y grid + labels at nice round steps.
         ctx.textBaseline = "middle";
         ctx.textAlign = "right";
-        const yTicks = Math.round((vmax - vmin) / vstep);
-        for (let i = 0; i <= yTicks; i++) {
-            const v = vmin + i * vstep;
-            const y = yOf(v);
+        for (const tk of yTicks) {
+            const y = yOf(tk.frac);
             ctx.strokeStyle = COLOR_GRID;
             ctx.beginPath();
             ctx.moveTo(m.l, y);
             ctx.lineTo(m.l + plotW, y);
             ctx.stroke();
             ctx.fillStyle = COLOR_MUTED;
-            ctx.fillText(v.toFixed(vdecimals), m.l - 8, y);
+            ctx.fillText(tk.text, m.l - 8, y);
         }
 
         // X labels.
@@ -260,16 +319,17 @@ function makeChart() {
             ctx.fillText(xLabel(t, span), xOf(t), m.t + plotH + 7);
         }
 
-        // Zero baseline when the range crosses it.
-        if (vmin < 0 && vmax > 0) {
+        // Zero baseline (numeric only, when the range crosses it).
+        if (crossesZero) {
             ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
             ctx.beginPath();
-            ctx.moveTo(m.l, yOf(0));
-            ctx.lineTo(m.l + plotW, yOf(0));
+            ctx.moveTo(m.l, yOf(fracOf(0)));
+            ctx.lineTo(m.l + plotW, yOf(fracOf(0)));
             ctx.stroke();
         }
 
-        // Line, broken at gaps.
+        // Line, broken at gaps; stepped for enums (a category holds until it
+        // changes) and straight for numeric series.
         plotted = [];
         ctx.strokeStyle = COLOR_LINE;
         ctx.lineWidth = 2;
@@ -277,20 +337,25 @@ function makeChart() {
         ctx.lineCap = "round";
         ctx.beginPath();
         let drawing = false;
+        let prevY = 0;
         for (const p of points) {
             if (p.v === null || p.v === undefined) {
                 drawing = false;
                 continue;
             }
             const x = xOf(p.t);
-            const y = yOf(p.v);
+            const y = yOf(fracOf(p.v));
             plotted.push({ x, y, t: p.t, v: p.v });
-            if (drawing) {
-                ctx.lineTo(x, y);
-            } else {
+            if (!drawing) {
                 ctx.moveTo(x, y);
                 drawing = true;
+            } else if (stepped) {
+                ctx.lineTo(x, prevY);
+                ctx.lineTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
             }
+            prevY = y;
         }
         ctx.stroke();
 
@@ -314,7 +379,7 @@ function makeChart() {
         ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
         ctx.fill();
 
-        const valueText = `${pt.v.toFixed(2)} ${unitLabel}`;
+        const valueText = fmtValue(pt.v);
         const timeText = new Date(pt.t).toLocaleString([], {
             month: "short",
             day: "numeric",
@@ -387,9 +452,10 @@ function makeChart() {
         setData(newPoints, meta) {
             points = newPoints;
             unitLabel = meta.unit;
+            labels = meta.labels || null;
             start = meta.start;
             end = meta.end;
-            heading.textContent = `${meta.label} (${meta.unit})`;
+            heading.textContent = meta.unit ? `${meta.label} (${meta.unit})` : meta.label;
             hoverIndex = -1;
             render();
         },
@@ -438,13 +504,20 @@ async function refresh() {
     }
 
     els.title.textContent = `${data.name} — History`;
+    renderTiles(data.tiles);
     syncCharts(data.series);
 
     const startMs = Date.parse(data.start);
     const endMs = Date.parse(data.end);
     for (const s of data.series) {
         const pts = data.buckets.map((b) => ({ t: Date.parse(b.t), v: b[s.key] }));
-        charts.get(s.key).setData(pts, { label: s.label, unit: s.unit, start: startMs, end: endMs });
+        charts.get(s.key).setData(pts, {
+            label: s.label,
+            unit: s.unit,
+            start: startMs,
+            end: endMs,
+            labels: s.labels,
+        });
     }
 }
 

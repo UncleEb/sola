@@ -568,13 +568,28 @@ func (s *dashboardServer) handleUpdateSettings(w http.ResponseWriter, r *http.Re
 	writeJSON(w, settingsBody{Background: cfg.Background})
 }
 
-// seriesDef describes one plottable metric. column is the SQL column it maps to
-// and stays unexported so it is not serialised to the client.
+// seriesDef describes one plottable metric. column and agg stay unexported so
+// they are not serialised to the client. agg is how the metric is aggregated
+// per bucket: "avg" (continuous readings), "max" (daily-reset totals like
+// yield/peak), or "mode" (enums like charge state).
 type seriesDef struct {
-	Key    string `json:"key"`
-	Label  string `json:"label"`
-	Unit   string `json:"unit"`
-	column string
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Unit  string `json:"unit"`
+	// Labels maps enum codes (as strings) to their display names, for a
+	// categorical Y-axis. Present only for "mode" series; omitted otherwise.
+	Labels  map[string]string `json:"labels,omitempty"`
+	column  string
+	agg     string
+	labeler func(uint16) string // code -> name, for enum series
+}
+
+// historyTile is a single headline value (the max over the range) shown as a
+// stat tile instead of a chart.
+type historyTile struct {
+	Label string   `json:"label"`
+	Unit  string   `json:"unit"`
+	Value *float64 `json:"value"`
 }
 
 type historyResponse struct {
@@ -585,6 +600,7 @@ type historyResponse struct {
 	Unit     string           `json:"unit"`
 	Series   []seriesDef      `json:"series"`
 	Buckets  []map[string]any `json:"buckets"`
+	Tiles    []historyTile    `json:"tiles"`
 }
 
 // historyBucketExpr maps a time-unit name to the SQLite strftime expression that
@@ -660,61 +676,97 @@ func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Fine units (minutes/hours) look at short windows where enum states are
+	// meaningful and daily totals are better shown as a headline; coarse units
+	// (days/weeks/months) graph the daily totals and drop the enums.
+	fine := unit == "minutes" || unit == "hours"
+
 	table := "battery_shunt_history"
 	var series []seriesDef
+	var tileDefs []seriesDef // computed as MAX over the range, shown as tiles
 	if device.DeviceType == DeviceTypeChargeController {
 		table = "charge_controller_history"
-		series = []seriesDef{{Key: "amperage", Label: "Amperage", Unit: "A", column: "battery_current"}}
+		// PV side first, then battery side (continuous, averaged).
+		series = []seriesDef{
+			{Key: "pv_power", Label: "PV Power", Unit: "W", column: "pv_power", agg: "avg"},
+			{Key: "pv_voltage", Label: "PV Voltage", Unit: "V", column: "pv_voltage", agg: "avg"},
+			{Key: "pv_current", Label: "PV Current", Unit: "A", column: "pv_current", agg: "avg"},
+			{Key: "battery_voltage", Label: "Battery Voltage", Unit: "V", column: "battery_voltage", agg: "avg"},
+			{Key: "battery_current", Label: "Battery Current", Unit: "A", column: "battery_current", agg: "avg"},
+		}
+		if fine {
+			// Enums as mode-per-bucket line charts; daily totals as tiles.
+			series = append(series,
+				seriesDef{Key: "charge_state", Label: "Charge State", column: "charge_state", agg: "mode", labeler: chargeStateName},
+				seriesDef{Key: "mpp_mode", Label: "MPPT Mode", column: "mpp_mode", agg: "mode", labeler: mppModeName},
+				seriesDef{Key: "error_code", Label: "Error Code", column: "error_code", agg: "mode", labeler: chargerErrorName},
+			)
+			tileDefs = []seriesDef{
+				{Label: "Yield Today", Unit: "kWh", column: "yield_today"},
+				{Label: "Peak Power", Unit: "W", column: "max_power_today"},
+			}
+		} else {
+			// Daily totals graphed as their per-bucket max; enums are meaningless
+			// at this resolution, so they are omitted.
+			series = append(series,
+				seriesDef{Key: "yield_today", Label: "Yield", Unit: "kWh", column: "yield_today", agg: "max"},
+				seriesDef{Key: "max_power_today", Label: "Peak Power", Unit: "W", column: "max_power_today", agg: "max"},
+			)
+		}
 	} else {
 		series = []seriesDef{
-			{Key: "amperage", Label: "Amperage", Unit: "A", column: "current"},
-			{Key: "voltage", Label: "Voltage", Unit: "V", column: "voltage"},
-			{Key: "wattage", Label: "Power", Unit: "W", column: "wattage"},
+			{Key: "amperage", Label: "Amperage", Unit: "A", column: "current", agg: "avg"},
+			{Key: "voltage", Label: "Voltage", Unit: "V", column: "voltage", agg: "avg"},
+			{Key: "wattage", Label: "Power", Unit: "W", column: "wattage", agg: "avg"},
 		}
 		// SOC only where the device owns the pool state of charge.
 		if aggregateIDs(cfg)[id] {
-			series = append(series, seriesDef{Key: "soc", Label: "State of Charge", Unit: "%", column: "soc"})
+			series = append(series, seriesDef{Key: "soc", Label: "State of Charge", Unit: "%", column: "soc", agg: "avg"})
 		}
 	}
 
-	// One row per bucket: its first timestamp plus the average of each metric.
-	selects := "MIN(ts) AS t"
+	// avg/max metrics come from one bucketed query; mode metrics need their own
+	// (SQLite has no mode aggregate) and are merged in by bucket key afterwards.
+	var avgMax []seriesDef
 	for _, sd := range series {
-		selects += ", AVG(" + sd.column + ")"
+		if sd.agg != "mode" {
+			avgMax = append(avgMax, sd)
+		}
 	}
-	query := fmt.Sprintf(
-		"SELECT %s FROM %s WHERE device_id = ? AND ts >= ? AND ts <= ? GROUP BY %s ORDER BY t;",
-		selects, table, bucketExpr,
-	)
 
-	rows, err := s.db.Query(query, id, startStr, endStr)
+	buckets, byBucket, err := s.queryHistoryBuckets(table, bucketExpr, id, startStr, endStr, avgMax)
 	if err != nil {
 		s.logger.Error("dashboard: query history", "device", id, "error", err)
 		http.Error(w, "failed to read history", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
 
-	buckets := []map[string]any{}
-	for rows.Next() {
-		var t string
-		vals := make([]sql.NullFloat64, len(series))
-		dest := make([]any, 0, len(series)+1)
-		dest = append(dest, &t)
-		for i := range vals {
-			dest = append(dest, &vals[i])
+	for i := range series {
+		if series[i].agg != "mode" {
+			continue
 		}
-		if err := rows.Scan(dest...); err != nil {
-			s.logger.Error("dashboard: scan history", "error", err)
+		if err := s.mergeHistoryMode(byBucket, table, bucketExpr, id, startStr, endStr, series[i]); err != nil {
+			s.logger.Error("dashboard: query history mode", "device", id, "series", series[i].Key, "error", err)
 			http.Error(w, "failed to read history", http.StatusInternalServerError)
 			return
 		}
+		// Label the codes that actually appear so the chart's Y-axis is text.
+		series[i].Labels = enumLabels(buckets, series[i].Key, series[i].labeler)
+	}
 
-		bucket := map[string]any{"t": t}
-		for i, sd := range series {
-			bucket[sd.Key] = nullFloat(vals[i])
+	tiles := make([]historyTile, 0, len(tileDefs))
+	for _, td := range tileDefs {
+		var v sql.NullFloat64
+		row := s.db.QueryRow(
+			fmt.Sprintf("SELECT MAX(%s) FROM %s WHERE device_id = ? AND ts >= ? AND ts <= ?;", td.column, table),
+			id, startStr, endStr,
+		)
+		if err := row.Scan(&v); err != nil {
+			s.logger.Error("dashboard: query history tile", "device", id, "error", err)
+			http.Error(w, "failed to read history", http.StatusInternalServerError)
+			return
 		}
-		buckets = append(buckets, bucket)
+		tiles = append(tiles, historyTile{Label: td.Label, Unit: td.Unit, Value: nullFloat(v)})
 	}
 
 	writeJSON(w, historyResponse{
@@ -725,7 +777,113 @@ func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) 
 		Unit:     unit,
 		Series:   series,
 		Buckets:  buckets,
+		Tiles:    tiles,
 	})
+}
+
+// queryHistoryBuckets runs the bucketed avg/max query and returns the buckets in
+// time order plus an index from bucket key to bucket (for merging mode series).
+func (s *dashboardServer) queryHistoryBuckets(
+	table, bucketExpr string, id int, startStr, endStr string, series []seriesDef,
+) ([]map[string]any, map[string]map[string]any, error) {
+	selects := bucketExpr + " AS bk, MIN(ts) AS t"
+	for _, sd := range series {
+		fn := "AVG"
+		if sd.agg == "max" {
+			fn = "MAX"
+		}
+		selects += ", " + fn + "(" + sd.column + ")"
+	}
+	query := fmt.Sprintf(
+		"SELECT %s FROM %s WHERE device_id = ? AND ts >= ? AND ts <= ? GROUP BY bk ORDER BY t;",
+		selects, table,
+	)
+
+	rows, err := s.db.Query(query, id, startStr, endStr)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	buckets := []map[string]any{}
+	byBucket := map[string]map[string]any{}
+	for rows.Next() {
+		var bk, t string
+		vals := make([]sql.NullFloat64, len(series))
+		dest := make([]any, 0, len(series)+2)
+		dest = append(dest, &bk, &t)
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, nil, err
+		}
+
+		bucket := map[string]any{"t": t}
+		for i, sd := range series {
+			bucket[sd.Key] = nullFloat(vals[i])
+		}
+		buckets = append(buckets, bucket)
+		byBucket[bk] = bucket
+	}
+
+	return buckets, byBucket, rows.Err()
+}
+
+// enumLabels builds a code->name map for the enum values that actually appear in
+// the buckets, so the chart's Y-axis can show names instead of raw codes.
+func enumLabels(buckets []map[string]any, key string, labeler func(uint16) string) map[string]string {
+	labels := map[string]string{}
+	if labeler == nil {
+		return labels
+	}
+	for _, b := range buckets {
+		v, ok := b[key].(*float64)
+		if !ok || v == nil {
+			continue
+		}
+		code := strconv.Itoa(int(*v))
+		if _, done := labels[code]; !done {
+			labels[code] = labeler(uint16(int(*v)))
+		}
+	}
+	return labels
+}
+
+// mergeHistoryMode computes the per-bucket mode (most common value) of an enum
+// column and writes it into the matching buckets. Buckets with no rows for the
+// column are simply left without that key.
+func (s *dashboardServer) mergeHistoryMode(
+	byBucket map[string]map[string]any, table, bucketExpr string, id int, startStr, endStr string, sd seriesDef,
+) error {
+	query := fmt.Sprintf(`
+SELECT bk, v FROM (
+    SELECT %s AS bk, %s AS v,
+           ROW_NUMBER() OVER (PARTITION BY %s ORDER BY COUNT(*) DESC, %s) AS rn
+    FROM %s
+    WHERE device_id = ? AND ts >= ? AND ts <= ? AND %s IS NOT NULL
+    GROUP BY bk, v
+) WHERE rn = 1;`,
+		bucketExpr, sd.column, bucketExpr, sd.column, table, sd.column)
+
+	rows, err := s.db.Query(query, id, startStr, endStr)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var bk string
+		var v sql.NullFloat64
+		if err := rows.Scan(&bk, &v); err != nil {
+			return err
+		}
+		if bucket := byBucket[bk]; bucket != nil {
+			bucket[sd.Key] = nullFloat(v)
+		}
+	}
+
+	return rows.Err()
 }
 
 // parseHistoryTime parses an RFC3339 timestamp, returning fallback when the

@@ -491,6 +491,36 @@ main {
     }
 }
 
+.tiles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.tile {
+    flex: 1 1 160px;
+    padding: 0.9rem 1rem;
+    border-radius: 10px;
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+}
+
+.tile__value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--flow);
+}
+
+.tile__label {
+    margin-top: 0.15rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
 .chart-block {
     margin-top: 1.5rem;
 }

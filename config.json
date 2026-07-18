@@ -6,6 +6,8 @@
   "debug": false,
   "soc_low_percent": 60,
   "background": "starfield",
+  "history_interval_seconds": 15,
+  "next_device_id": 0,
   "devices": [
     {
       "id": 2,
