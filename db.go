@@ -88,7 +88,40 @@ CREATE TABLE IF NOT EXISTS charge_controller_status (
     error_code      INTEGER,
     status          TEXT    NOT NULL DEFAULT 'offline',
     updated_at      TEXT
-);`
+);
+
+-- History: one row per device per snapshot (measurements only; identity lives
+-- in the status/registry tables). A row exists only for a successful read, so
+-- gaps are genuine offline periods. The composite PRIMARY KEY doubles as the
+-- (device_id, ts) index that range/graph queries scan; WITHOUT ROWID stores the
+-- rows clustered in that order for compact, fast reads. Rows are keyed by the
+-- never-reused device_id, so a deleted device's history is never mixed with a
+-- later device's.
+CREATE TABLE IF NOT EXISTS battery_shunt_history (
+    device_id INTEGER NOT NULL,
+    ts        TEXT    NOT NULL,
+    voltage   REAL,
+    current   REAL,
+    wattage   INTEGER,
+    soc       INTEGER,
+    PRIMARY KEY (device_id, ts)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS charge_controller_history (
+    device_id       INTEGER NOT NULL,
+    ts              TEXT    NOT NULL,
+    battery_voltage REAL,
+    battery_current REAL,
+    pv_voltage      REAL,
+    pv_current      REAL,
+    pv_power        REAL,
+    yield_today     REAL,
+    max_power_today INTEGER,
+    charge_state    INTEGER,
+    mpp_mode        INTEGER,
+    error_code      INTEGER,
+    PRIMARY KEY (device_id, ts)
+) WITHOUT ROWID;`
 
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
@@ -124,6 +157,23 @@ ON CONFLICT(id) DO UPDATE SET
 	)
 	if err != nil {
 		return fmt.Errorf("upsert battery shunt %q: %w", s.Name, err)
+	}
+
+	return nil
+}
+
+// insertShuntHistory appends one historical snapshot for a battery shunt. OR
+// IGNORE makes it a no-op if a row already exists for this (device, ts) — e.g.
+// two snapshots landing in the same second across a restart.
+func insertShuntHistory(db *sql.DB, s ShuntStatus, ts string) error {
+	const query = `
+INSERT OR IGNORE INTO battery_shunt_history
+    (device_id, ts, voltage, current, wattage, soc)
+VALUES (?, ?, ?, ?, ?, ?);`
+
+	_, err := db.Exec(query, s.ID, ts, s.Voltage, s.Current, s.Wattage, s.SOC)
+	if err != nil {
+		return fmt.Errorf("insert shunt history %d: %w", s.ID, err)
 	}
 
 	return nil
@@ -188,6 +238,29 @@ ON CONFLICT(id) DO UPDATE SET
 	)
 	if err != nil {
 		return fmt.Errorf("upsert charge controller %q: %w", c.Name, err)
+	}
+
+	return nil
+}
+
+// insertChargeControllerHistory appends one historical snapshot for a charge
+// controller. See insertShuntHistory for the OR IGNORE rationale.
+func insertChargeControllerHistory(db *sql.DB, c ChargeControllerStatus, ts string) error {
+	const query = `
+INSERT OR IGNORE INTO charge_controller_history
+    (device_id, ts, battery_voltage, battery_current, pv_voltage, pv_current,
+     pv_power, yield_today, max_power_today, charge_state, mpp_mode, error_code)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := db.Exec(
+		query,
+		c.ID, ts,
+		c.BatteryVoltage, c.BatteryCurrent,
+		c.PVVoltage, c.PVCurrent, c.PVPower, c.YieldToday, c.MaxPowerToday,
+		c.ChargeState, c.MPPMode, c.ErrorCode,
+	)
+	if err != nil {
+		return fmt.Errorf("insert charge controller history %d: %w", c.ID, err)
 	}
 
 	return nil

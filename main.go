@@ -158,7 +158,10 @@ func main() {
 	// uses the startup address; changing http_addr requires a restart.
 	dashboard := StartDashboard(logger, db, cfg, path)
 
-	pollAndStore(logger, db, client, aggregate, banks, charger, cfg.Debug)
+	// History snapshots are captured from the poll loop (no separate goroutine)
+	// at most once per history interval. The first poll records a snapshot.
+	lastHistoryAt := time.Now()
+	pollAndStore(logger, db, client, aggregate, banks, charger, cfg.Debug, true)
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
@@ -206,7 +209,15 @@ func main() {
 				current = fresh
 			}
 
-			pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug)
+			// Record a history snapshot once per (hot-appliable) history
+			// interval. It is a floor: snapshots ride poll cycles, so they can't
+			// be closer together than the poll interval.
+			recordHistory := time.Since(lastHistoryAt) >= time.Duration(current.HistoryIntervalSec)*time.Second
+			if recordHistory {
+				lastHistoryAt = time.Now()
+			}
+
+			pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug, recordHistory)
 
 		case <-ctx.Done():
 			logger.Info("shutdown signal received")
@@ -361,6 +372,7 @@ func pollAndStore(
 	banks []BatteryBank,
 	solarCharger *SolarCharger,
 	debug bool,
+	recordHistory bool,
 ) {
 	// One timestamp for the whole poll so every row updated in this cycle
 	// shares the same reading time.
@@ -403,6 +415,12 @@ func pollAndStore(
 
 			if err := upsertBatteryShunt(db, shunt, updatedAt); err != nil {
 				logger.Error("failed to store All Banks reading", "error", err)
+			}
+
+			if recordHistory {
+				if err := insertShuntHistory(db, shunt, updatedAt); err != nil {
+					logger.Error("failed to record All Banks history", "error", err)
+				}
 			}
 		}
 	}
@@ -451,6 +469,16 @@ func pollAndStore(
 				"error", err,
 			)
 		}
+
+		if recordHistory {
+			if err := insertShuntHistory(db, shunt, updatedAt); err != nil {
+				logger.Error(
+					"failed to record battery bank history",
+					"bank", banks[i].Name,
+					"error", err,
+				)
+			}
+		}
 	}
 
 	// A configuration may have no charge controller at all (it was never added,
@@ -491,6 +519,12 @@ func pollAndStore(
 
 			if err := upsertChargeController(db, controller, updatedAt); err != nil {
 				logger.Error("failed to store charge controller reading", "error", err)
+			}
+
+			if recordHistory {
+				if err := insertChargeControllerHistory(db, controller, updatedAt); err != nil {
+					logger.Error("failed to record charge controller history", "error", err)
+				}
 			}
 		}
 	}

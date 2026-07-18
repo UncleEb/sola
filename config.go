@@ -27,10 +27,12 @@ type Config struct {
 	ModbusURL           string         `json:"modbus_url"`
 	PollIntervalSeconds int            `json:"poll_interval_seconds"`
 	DatabasePath        string         `json:"database_path"`
-	HTTPAddr            string         `json:"http_addr"`       // dashboard listen address; defaults to defaultHTTPAddr
-	Debug               bool           `json:"debug"`           // when true, print each poll's readings to stdout
-	SOCLowPercent       int            `json:"soc_low_percent"` // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
-	Background          string         `json:"background"`      // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
+	HTTPAddr            string         `json:"http_addr"`                // dashboard listen address; defaults to defaultHTTPAddr
+	Debug               bool           `json:"debug"`                    // when true, print each poll's readings to stdout
+	SOCLowPercent       int            `json:"soc_low_percent"`          // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
+	Background          string         `json:"background"`               // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
+	HistoryIntervalSec  int            `json:"history_interval_seconds"` // snapshot cadence for the history tables; defaults to defaultHistoryIntervalSec
+	NextDeviceID        int            `json:"next_device_id"`           // monotonic ID allocator; only ever increases so IDs are never reused
 	Devices             []DeviceConfig `json:"devices"`
 }
 
@@ -42,6 +44,10 @@ const (
 
 	defaultBackground = BackgroundStarfield
 )
+
+// defaultHistoryIntervalSec is the history snapshot cadence used when
+// history_interval_seconds is omitted.
+const defaultHistoryIntervalSec = 15
 
 // defaultHTTPAddr is the dashboard listen address used when http_addr is
 // omitted from the config file.
@@ -108,6 +114,11 @@ func LoadConfig(path string) (Config, error) {
 		cfg.Background = defaultBackground
 	}
 
+	// A missing/invalid history interval falls back to the default.
+	if cfg.HistoryIntervalSec <= 0 {
+		cfg.HistoryIntervalSec = defaultHistoryIntervalSec
+	}
+
 	return cfg, nil
 }
 
@@ -148,17 +159,22 @@ func SaveConfig(path string, cfg Config) error {
 	return nil
 }
 
-// nextDeviceID returns an unused device ID (one past the current maximum), so
-// added devices never collide with existing ones.
+// nextDeviceID returns the ID to assign to a new device. It is the persisted
+// monotonic counter, floored to just past any existing ID (so a hand-edited or
+// pre-counter config still can't collide). IDs are NEVER reused: because the
+// counter only advances, a deleted device's ID is never handed out again, which
+// keeps its historical rows unambiguously its own.
+//
+// The caller must persist cfg.NextDeviceID = returned + 1 so the counter sticks.
 func nextDeviceID(cfg Config) int {
-	max := 0
+	next := cfg.NextDeviceID
 	for _, d := range cfg.Devices {
-		if d.ID > max {
-			max = d.ID
+		if d.ID >= next {
+			next = d.ID + 1
 		}
 	}
 
-	return max + 1
+	return next
 }
 
 // validate rejects configurations that could not run correctly, so problems

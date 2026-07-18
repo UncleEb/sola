@@ -434,8 +434,11 @@ func (s *dashboardServer) handleCreateDevice(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// The server assigns the ID so additions never collide.
+	// The server assigns the ID from the monotonic counter and advances it, so
+	// IDs are never reused (which would mix a new device into a deleted one's
+	// history).
 	d.ID = nextDeviceID(cfg)
+	cfg.NextDeviceID = d.ID + 1
 	cfg.Devices = append(cfg.Devices, d)
 
 	if !s.persist(w, cfg) {
