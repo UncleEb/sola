@@ -16,4 +16,9 @@
 
     <string name="menu_change_server">Change server</string>
     <string name="menu_reload">Reload</string>
+
+    <string name="offline_title">Can\'t reach Sola</string>
+    <string name="offline_message">The dashboard isn\'t responding. You may be off the local network, or the server may be down. It\'ll reconnect automatically when it\'s back.</string>
+    <string name="offline_retry">Retry</string>
+    <string name="offline_reconnecting">Reconnecting…</string>
 </resources>

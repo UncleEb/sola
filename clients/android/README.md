@@ -1,9 +1,11 @@
 # Sola — Android client
 
 A thin Android wrapper around the Sola web dashboard. On first launch it asks for
-the dashboard's IP/hostname and port, verifies the server is actually reachable
-(by probing `/api/status`), then loads the dashboard in a full-screen WebView.
-The address is remembered, so later launches go straight to the dashboard.
+the dashboard's IP/hostname and port, then loads the dashboard in a full-screen
+WebView. The address is remembered, so later launches go straight to the
+dashboard. If the server can't be reached (off the local network, VPN still
+waking up, or server down), it shows an offline screen and reconnects
+automatically when connectivity returns.
 
 ## Requirements
 
@@ -63,10 +65,9 @@ debugging on: `adb install app-release.apk`.
 
 | File | Role |
 |------|------|
-| `SettingsActivity.kt` | Launch screen: collect IP + port, validate format, probe reachability, hand off. Auto-connects to a remembered server. |
-| `ConnectionChecker.kt` | Off-main-thread `GET /api/status` probe — the real "is it there?" check. |
+| `SettingsActivity.kt` | Launch screen: collect IP + port, validate format, hand off. Skips straight to a remembered server (no pre-flight probe — that would block slow/VPN connections). |
 | `ServerConfig.kt` | Format validation + `SharedPreferences` persistence. Default port `8088`. |
-| `WebViewActivity.kt` | Full-screen WebView (JS + DOM storage on), back-button → WebView history. Toolbar (**Reload** / **Change server**) is hidden by default; swipe down from the top edge to reveal it, and it auto-hides after ~3.5s idle. |
+| `WebViewActivity.kt` | Full-screen WebView (JS + DOM storage on), back-button → WebView history. Handles an unreachable dashboard with an offline screen (**Retry** / **Change server**) and auto-reconnects when the network returns. Toolbar (**Reload** / **Change server**) is hidden by default; swipe down from the top edge to reveal it, and it auto-hides after ~3.5s idle. |
 
 ## Notes & gotchas
 
