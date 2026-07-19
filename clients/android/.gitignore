@@ -1,0 +1,21 @@
+# Gradle / Android build output
+.gradle/
+build/
+**/build/
+captures/
+
+# Local environment (SDK path, signing) — machine-specific, never commit
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.cxx/
+
+# Keystores & signing secrets
+*.jks
+*.keystore
+keystore.properties
+
+# Misc
+.DS_Store

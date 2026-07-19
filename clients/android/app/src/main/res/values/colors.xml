@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App chrome accent — matches the dashboard's blue for a consistent feel. -->
+    <color name="sola_primary">#58A6FF</color>
+    <color name="sola_primary_dark">#1F6FEB</color>
+    <!-- Dark text/icons sit on top of the blue accent (better contrast than white). -->
+    <color name="sola_on_primary">#0E1116</color>
+
+    <!-- Brand-dark background behind the launcher-icon mark (matches favicon). -->
+    <color name="ic_launcher_background">#0E1116</color>
+
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+</resources>

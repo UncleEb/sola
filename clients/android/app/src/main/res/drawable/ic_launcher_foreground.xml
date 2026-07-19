@@ -1,0 +1,24 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!--
+        Sola brand mark (the "S" swoosh), scaled and centered into the adaptive-
+        icon safe zone. Converted from assets/mark-stroke.svg (natural center ~32,32).
+    -->
+    <group
+        android:scaleX="1.35"
+        android:scaleY="1.35"
+        android:pivotX="32"
+        android:pivotY="32"
+        android:translateX="22"
+        android:translateY="22">
+        <path
+            android:pathData="M45,18C29,13 21,27 32,32C43,37 35,51 19,46"
+            android:strokeColor="#2E8BFF"
+            android:strokeWidth="8"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>

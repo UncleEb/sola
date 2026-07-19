@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Sola</string>
+
+    <string name="settings_title">Connect to Sola</string>
+    <string name="settings_subtitle">Enter the address of your Sola dashboard.</string>
+    <string name="hint_host">IP address or hostname</string>
+    <string name="hint_port">Port</string>
+    <string name="action_connect">Connect</string>
+    <string name="checkbox_remember">Remember this server</string>
+
+    <string name="status_checking">Checking connection…</string>
+    <string name="error_host_empty">Enter an IP address or hostname.</string>
+    <string name="error_host_invalid">That doesn\'t look like a valid address.</string>
+    <string name="error_port_invalid">Port must be between 1 and 65535.</string>
+    <string name="error_unreachable">Couldn\'t reach the dashboard at %1$s.\nCheck the address and that Sola is running.</string>
+
+    <string name="menu_change_server">Change server</string>
+    <string name="menu_reload">Reload</string>
+</resources>

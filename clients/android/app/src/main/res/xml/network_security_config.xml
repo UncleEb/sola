@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Sola dashboard is served over plain HTTP on a local network, so we must
+    opt back into cleartext traffic (Android 9+ blocks it by default).
+
+    NOTE: Android's <domain> elements accept hostnames/IP literals but NOT CIDR
+    ranges, and the user types an arbitrary LAN IP at runtime — so we can't
+    enumerate allowed hosts in advance. We therefore permit cleartext globally
+    via <base-config>. That's the standard approach for a LAN-only dashboard
+    wrapper. If you ever expose the dashboard over HTTPS, tighten this to
+    cleartextTrafficPermitted="false".
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
