@@ -1,6 +1,7 @@
-# Compiled binaries
-sola
-victron-collector
+# Compiled binaries (root-anchored so these don't also match the Android
+# source dir clients/.../com/alro/sola/).
+/sola
+/victron-collector
 
 # Local databases
 *.db

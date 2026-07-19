@@ -21,4 +21,23 @@
     <string name="offline_message">The dashboard isn\'t responding. You may be off the local network, or the server may be down. It\'ll reconnect automatically when it\'s back.</string>
     <string name="offline_retry">Retry</string>
     <string name="offline_reconnecting">Reconnecting…</string>
+
+    <!-- Remote access / WireGuard -->
+    <string name="wg_title">Remote access</string>
+    <string name="action_remote_access">Remote access (WireGuard)</string>
+    <string name="menu_remote_access">Remote access</string>
+    <string name="wg_subtitle">Paste your WireGuard configuration or scan its QR code. It\'s stored encrypted on this device and used to reach Sola when you\'re away from the local network.</string>
+    <string name="wg_scan">Scan QR code</string>
+    <string name="wg_hint_config">WireGuard configuration</string>
+    <string name="wg_save">Save</string>
+    <string name="wg_remove">Remove</string>
+    <string name="wg_saved">Configuration saved</string>
+    <string name="wg_removed">Configuration removed</string>
+    <string name="wg_error_parse">That doesn\'t look like a complete WireGuard config. It needs a private key, an address, and a peer with a public key and endpoint.</string>
+    <string name="wg_scan_prompt">Point the camera at a WireGuard QR code</string>
+    <string name="wg_summary_empty">No configuration yet.</string>
+    <string name="wg_summary_endpoint">Endpoint: %1$s</string>
+    <string name="wg_summary_address">Address: %1$s</string>
+    <string name="wg_summary_allowed">Allowed IPs: %1$s</string>
+    <string name="wg_summary_placeholder">—</string>
 </resources>

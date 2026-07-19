@@ -70,4 +70,6 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // QR scanning — pure FOSS (Apache-2.0), no Google Play deps (keeps F-Droid happy).
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

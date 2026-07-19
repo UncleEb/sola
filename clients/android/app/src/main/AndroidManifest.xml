@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Needed to reach the dashboard and to probe reachability. -->
+    <!-- Needed to reach the dashboard and observe connectivity changes. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Scanning a WireGuard config QR code. Camera is not required to run the
+         app (you can paste the config instead), so it's an optional feature. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -29,6 +34,12 @@
             android:name=".WebViewActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity
+            android:name=".WireGuardConfigActivity"
+            android:exported="false"
+            android:label="@string/wg_title"
+            android:windowSoftInputMode="adjustResize" />
 
     </application>
 
