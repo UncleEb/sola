@@ -16,12 +16,22 @@ data class WireGuardConfig(
     val hasPrivateKey: Boolean,
     val hasPresharedKey: Boolean,
 ) {
+    /**
+     * Required fields that are absent, by their `.conf` key name. A config is
+     * valid for bringing up a tunnel when this is empty. Reporting the specific
+     * missing field (rather than a generic "incomplete") is what makes the error
+     * actionable — e.g. a config with everything but an Endpoint.
+     */
+    val missingFields: List<String>
+        get() = buildList {
+            if (!hasPrivateKey) add("PrivateKey")
+            if (interfaceAddress.isNullOrBlank()) add("Address")
+            if (peerPublicKey.isNullOrBlank()) add("PublicKey (peer)")
+            if (endpoint.isNullOrBlank()) add("Endpoint")
+        }
+
     /** The minimum needed to actually bring up a tunnel to the server. */
-    val isValid: Boolean
-        get() = hasPrivateKey &&
-            !interfaceAddress.isNullOrBlank() &&
-            !peerPublicKey.isNullOrBlank() &&
-            !endpoint.isNullOrBlank()
+    val isValid: Boolean get() = missingFields.isEmpty()
 }
 
 /**

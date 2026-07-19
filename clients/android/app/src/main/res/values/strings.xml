@@ -33,7 +33,7 @@
     <string name="wg_remove">Remove</string>
     <string name="wg_saved">Configuration saved</string>
     <string name="wg_removed">Configuration removed</string>
-    <string name="wg_error_parse">That doesn\'t look like a complete WireGuard config. It needs a private key, an address, and a peer with a public key and endpoint.</string>
+    <string name="wg_error_missing">Incomplete WireGuard config — missing: %1$s</string>
     <string name="wg_scan_prompt">Point the camera at a WireGuard QR code</string>
     <string name="wg_summary_empty">No configuration yet.</string>
     <string name="wg_summary_endpoint">Endpoint: %1$s</string>

@@ -76,8 +76,10 @@ class WireGuardConfigActivity : AppCompatActivity() {
 
     private fun onSave() {
         val text = currentText()
-        if (!WireGuardConfigParser.parse(text).isValid) {
-            Toast.makeText(this, R.string.wg_error_parse, Toast.LENGTH_LONG).show()
+        val cfg = WireGuardConfigParser.parse(text)
+        if (!cfg.isValid) {
+            val message = getString(R.string.wg_error_missing, cfg.missingFields.joinToString(", "))
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
             return
         }
         WireGuardConfigStore.save(this, text)
