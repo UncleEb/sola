@@ -41,6 +41,18 @@
             android:label="@string/wg_title"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- WireGuard tunnel service (provided by the wireguard-android library).
+             The system binds this to run the VPN; BIND_VPN_SERVICE is what makes
+             it a VPN provider. -->
+        <service
+            android:name="com.wireguard.android.backend.GoBackend$VpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>

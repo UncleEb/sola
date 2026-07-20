@@ -21,8 +21,8 @@ android {
         applicationId = "com.alro.sola"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     signingConfigs {
@@ -72,4 +72,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // QR scanning — pure FOSS (Apache-2.0), no Google Play deps (keeps F-Droid happy).
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // WireGuard backend (embeds wireguard-go, drives Android's VpnService).
+    // Apache-2.0 + MIT (wireguard-go) — permissive, F-Droid-compatible. Adds
+    // native .so libs per ABI, so the APK grows a few MB.
+    implementation("com.wireguard.android:tunnel:1.0.20230706")
 }

@@ -40,4 +40,16 @@
     <string name="wg_summary_address">Address: %1$s</string>
     <string name="wg_summary_allowed">Allowed IPs: %1$s</string>
     <string name="wg_summary_placeholder">—</string>
+    <string name="wg_tunnel_status">Tunnel: %1$s</string>
+    <string name="wg_state_down">Disconnected</string>
+    <string name="wg_state_up">Connected</string>
+    <string name="wg_state_toggle">Switching…</string>
+    <string name="wg_connect">Connect</string>
+    <string name="wg_disconnect">Disconnect</string>
+    <string name="wg_need_config">Save a configuration first.</string>
+    <string name="wg_tunnel_error">Couldn\'t start the tunnel: %1$s</string>
+    <string name="wg_other_vpn_title">Another VPN is active</string>
+    <string name="wg_other_vpn_message">Android allows only one VPN at a time. Turn off your other VPN — including any \"Always-on VPN\" in Settings (not just disconnecting it) — then try connecting again.</string>
+    <string name="wg_open_vpn_settings">Open VPN settings</string>
+    <string name="wg_consent_declined">VPN permission wasn\'t granted. If you use an always-on VPN, turn it off in Settings and try again.</string>
 </resources>
