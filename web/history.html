@@ -17,8 +17,13 @@
             <a class="brand" href="/" aria-label="Sola home"><img class="brand__logo" src="/assets/logo.svg" alt="Sola"></a>
             <nav class="nav">
                 <a href="/" class="nav__link">Dashboard</a>
-                <a href="/devices" class="nav__link">Devices</a>
-                <a href="/settings" class="nav__link">Settings</a>
+                <details class="nav__dropdown">
+                    <summary class="nav__link nav__dropdown-toggle">Settings</summary>
+                    <div class="nav__dropdown-menu">
+                        <a href="/settings" class="nav__link">Settings</a>
+                        <a href="/devices" class="nav__link">Devices</a>
+                    </div>
+                </details>
             </nav>
         </div>
     </header>
