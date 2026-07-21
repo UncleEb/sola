@@ -1,4 +1,4 @@
-package com.alro.sola
+package dev.uncleeb.sola
 
 import android.app.Activity
 import android.content.Intent
@@ -14,7 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
-import com.alro.sola.databinding.ActivityWireguardConfigBinding
+import dev.uncleeb.sola.databinding.ActivityWireguardConfigBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions

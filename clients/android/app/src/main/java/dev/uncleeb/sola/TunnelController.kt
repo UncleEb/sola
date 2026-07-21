@@ -1,4 +1,4 @@
-package com.alro.sola
+package dev.uncleeb.sola
 
 import android.content.Context
 import com.wireguard.android.backend.Backend

@@ -1,4 +1,4 @@
-package com.alro.sola
+package dev.uncleeb.sola
 
 import android.annotation.SuppressLint
 import android.content.Intent
@@ -22,7 +22,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import com.alro.sola.databinding.ActivityWebviewBinding
+import dev.uncleeb.sola.databinding.ActivityWebviewBinding
 import kotlin.math.abs
 
 /**

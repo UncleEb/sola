@@ -14,11 +14,11 @@ val keystoreProps = Properties().apply {
 }
 
 android {
-    namespace = "com.alro.sola"
+    namespace = "dev.uncleeb.sola"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.alro.sola"
+        applicationId = "dev.uncleeb.sola"
         minSdk = 26
         targetSdk = 34
         versionCode = 3

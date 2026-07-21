@@ -1,4 +1,4 @@
-package com.alro.sola
+package dev.uncleeb.sola
 
 /**
  * A lightweight, non-secret summary of a WireGuard `.conf`. The raw text is what

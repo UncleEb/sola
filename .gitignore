@@ -1,5 +1,5 @@
 # Compiled binaries (root-anchored so these don't also match the Android
-# source dir clients/.../com/alro/sola/).
+# source dir clients/.../sola/).
 /sola
 /victron-collector
 

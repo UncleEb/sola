@@ -1,4 +1,4 @@
-package com.alro.sola
+package dev.uncleeb.sola
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties

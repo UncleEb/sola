@@ -1,9 +1,9 @@
-package com.alro.sola
+package dev.uncleeb.sola
 
 import android.content.Intent
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
-import com.alro.sola.databinding.ActivitySettingsBinding
+import dev.uncleeb.sola.databinding.ActivitySettingsBinding
 
 /**
  * Launch screen. Collects an IP/host + port, validates the *format*, and opens
