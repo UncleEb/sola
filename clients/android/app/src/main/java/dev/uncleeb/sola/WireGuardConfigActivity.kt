@@ -19,7 +19,12 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.wireguard.android.backend.Tunnel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Lets the user provide a WireGuard configuration — by pasting the `.conf` text
@@ -32,6 +37,9 @@ import kotlinx.coroutines.launch
 class WireGuardConfigActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityWireguardConfigBinding
+
+    // Polls tunnel state + handshake stats while this screen is visible.
+    private var statsJob: Job? = null
 
     // A QR-encoded WireGuard config is just the .conf text.
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
@@ -77,13 +85,35 @@ class WireGuardConfigActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // Reflect live state changes (the backend may report them off-thread).
-        TunnelController.stateListener = { state -> runOnUiThread { showTunnelState(state) } }
-        showTunnelState(TunnelController.currentState(this))
+        TunnelController.stateListener = { state -> runOnUiThread { renderStatus(state, null) } }
+        // Poll while this screen is visible so "Connected" reflects a real
+        // handshake (and its age), not just an interface being up.
+        startStatusPolling()
     }
 
     override fun onPause() {
         super.onPause()
         TunnelController.stateListener = null
+        statsJob?.cancel()
+        statsJob = null
+    }
+
+    private fun startStatusPolling() {
+        statsJob?.cancel()
+        statsJob = lifecycleScope.launch {
+            while (isActive) {
+                val state = withContext(Dispatchers.IO) {
+                    TunnelController.currentState(this@WireGuardConfigActivity)
+                }
+                val stats = if (state == Tunnel.State.UP) {
+                    TunnelController.statistics(this@WireGuardConfigActivity)
+                } else {
+                    null
+                }
+                renderStatus(state, stats)
+                delay(2000)
+            }
+        }
     }
 
     // --- QR / config entry ---------------------------------------------------
@@ -239,12 +269,39 @@ class WireGuardConfigActivity : AppCompatActivity() {
             getString(R.string.wg_tunnel_status, getString(R.string.wg_state_toggle))
     }
 
-    private fun showTunnelState(state: Tunnel.State) {
-        binding.tunnelStatus.text = getString(R.string.wg_tunnel_status, stateLabel(state))
+    /** State-only update (no stats yet) — the poll loop enriches it within ~2s. */
+    private fun showTunnelState(state: Tunnel.State) = renderStatus(state, null)
+
+    private fun renderStatus(state: Tunnel.State, stats: TunnelController.TunnelStats?) {
         binding.buttonTunnel.text =
             getString(if (state == Tunnel.State.UP) R.string.wg_disconnect else R.string.wg_connect)
         // Always tappable — validation/feedback happens on tap, never a dead button.
         binding.buttonTunnel.isEnabled = true
+
+        val detail = when (state) {
+            Tunnel.State.UP -> {
+                val handshake = stats?.lastHandshakeEpochMillis ?: 0L
+                if (handshake <= 0L) {
+                    // Interface up but no handshake yet — server unreachable or wrong
+                    // keys. This is the "Connected but not really" case, made honest.
+                    getString(R.string.wg_state_up_nohandshake)
+                } else {
+                    getString(R.string.wg_state_up_handshake, agoString(handshake))
+                }
+            }
+            Tunnel.State.TOGGLE -> getString(R.string.wg_state_toggle)
+            else -> getString(R.string.wg_state_down)
+        }
+        binding.tunnelStatus.text = getString(R.string.wg_tunnel_status, detail)
+    }
+
+    private fun agoString(epochMillis: Long): String {
+        val seconds = ((System.currentTimeMillis() - epochMillis) / 1000).coerceAtLeast(0)
+        return when {
+            seconds < 60 -> "${seconds}s"
+            seconds < 3600 -> "${seconds / 60}m"
+            else -> "${seconds / 3600}h"
+        }
     }
 
     /** Human-readable exception detail for the toast (class + message + cause). */
@@ -257,13 +314,6 @@ class WireGuardConfigActivity : AppCompatActivity() {
         }
     }
 
-    private fun stateLabel(state: Tunnel.State): String = getString(
-        when (state) {
-            Tunnel.State.UP -> R.string.wg_state_up
-            Tunnel.State.TOGGLE -> R.string.wg_state_toggle
-            else -> R.string.wg_state_down
-        },
-    )
 
     private fun updateControls() {
         binding.buttonRemove.visibility =

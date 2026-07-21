@@ -42,7 +42,8 @@
     <string name="wg_summary_placeholder">—</string>
     <string name="wg_tunnel_status">Tunnel: %1$s</string>
     <string name="wg_state_down">Disconnected</string>
-    <string name="wg_state_up">Connected</string>
+    <string name="wg_state_up_nohandshake">Connected (waiting for handshake…)</string>
+    <string name="wg_state_up_handshake">Connected · handshake %1$s ago</string>
     <string name="wg_state_toggle">Switching…</string>
     <string name="wg_connect">Connect</string>
     <string name="wg_disconnect">Disconnect</string>

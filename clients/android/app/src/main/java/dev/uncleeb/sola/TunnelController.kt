@@ -50,6 +50,26 @@ object TunnelController {
             backend(context).setState(tunnel(), Tunnel.State.DOWN, null)
         }
 
+    /** Point-in-time tunnel stats. lastHandshakeEpochMillis is 0 until the peer
+     *  actually completes a handshake — the signal that "Connected" is real. */
+    data class TunnelStats(
+        val lastHandshakeEpochMillis: Long,
+        val rxBytes: Long,
+        val txBytes: Long,
+    )
+
+    suspend fun statistics(context: Context): TunnelStats? = withContext(Dispatchers.IO) {
+        val backend = backend ?: return@withContext null
+        val tunnel = tunnel ?: return@withContext null
+        runCatching {
+            val stats = backend.getStatistics(tunnel)
+            val lastHandshake = stats.peers()
+                .mapNotNull { key -> stats.peer(key)?.latestHandshakeEpochMillis() }
+                .maxOrNull() ?: 0L
+            TunnelStats(lastHandshake, stats.totalRx(), stats.totalTx())
+        }.getOrNull()
+    }
+
     private class SolaTunnel : Tunnel {
         override fun getName(): String = TUNNEL_NAME
         override fun onStateChange(newState: Tunnel.State) {
