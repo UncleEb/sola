@@ -21,6 +21,8 @@
     <string name="offline_message">The dashboard isn\'t responding. You may be off the local network, or the server may be down. It\'ll reconnect automatically when it\'s back.</string>
     <string name="offline_retry">Retry</string>
     <string name="offline_reconnecting">Reconnecting…</string>
+    <string name="connecting_checking">Connecting…</string>
+    <string name="connecting_tunnel">Connecting via tunnel…</string>
 
     <!-- Remote access / WireGuard -->
     <string name="wg_title">Remote access</string>

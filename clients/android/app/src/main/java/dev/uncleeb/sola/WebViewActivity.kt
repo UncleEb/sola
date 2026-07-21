@@ -5,6 +5,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -22,7 +24,14 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.wireguard.android.backend.Tunnel
 import dev.uncleeb.sola.databinding.ActivityWebviewBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -50,12 +59,15 @@ class WebViewActivity : AppCompatActivity() {
     private var rendererGone = false
     private var reloadOnResume = false
     private var networkCallbackRegistered = false
+    // True only when the auto-switch brought the tunnel up itself, so we know to
+    // tear it back down when leaving Sola (vs. a tunnel the user started manually).
+    private var autoStartedTunnel = false
     private val connectivityManager by lazy { getSystemService(ConnectivityManager::class.java) }
 
-    // When the network (or WireGuard tunnel) comes back, retry a failed load.
+    // When the network (or WireGuard tunnel) comes back, re-run the decision.
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            runOnUiThread { if (loadFailed) retryLoad() }
+            runOnUiThread { if (loadFailed) connectAndLoad() }
         }
     }
 
@@ -81,13 +93,10 @@ class WebViewActivity : AppCompatActivity() {
         binding.buttonRetry.setOnClickListener { retryLoad() }
         binding.buttonOfflineChangeServer.setOnClickListener { changeServer() }
 
-        // Always load fresh. We deliberately do NOT persist WebView state across
-        // recreation: WebView.saveState() can serialize a huge page/history blob
-        // that overflows the Binder transaction limit and crashes the app with
-        // TransactionTooLargeException. The dashboard is live data, so a fresh
-        // load on recreation is both safe and more correct. (Rotation doesn't
-        // recreate this activity — see android:configChanges in the manifest.)
-        binding.webView.loadUrl(dashboardUrl)
+        // Decide direct-vs-tunnel, then load. (We deliberately don't persist
+        // WebView state across recreation — saveState() can overflow the Binder
+        // transaction limit and crash; the dashboard is live data anyway.)
+        connectAndLoad()
     }
 
     override fun onStart() {
@@ -108,12 +117,11 @@ class WebViewActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh on returning to the foreground so a stale page (e.g. the
-        // network dropped while we were backgrounded) reloads and, if the server
-        // is now unreachable, surfaces the offline screen instead of pretending
-        // to still be connected. Skipped on the initial resume (onCreate loads).
+        // On returning to the foreground, re-run the full decision so a network
+        // change while we were away (e.g. left the LAN) transparently switches to
+        // the tunnel. Skipped on the initial resume (onCreate already ran it).
         if (reloadOnResume && !rendererGone) {
-            binding.webView.loadUrl(dashboardUrl)
+            connectAndLoad()
         }
         reloadOnResume = true
     }
@@ -184,6 +192,13 @@ class WebViewActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         autoHideHandler.removeCallbacks(autoHideRunnable)
+        // If we auto-started the tunnel, tear it down when leaving Sola so it
+        // doesn't keep routing all traffic through home. A tunnel the user
+        // started manually (from Remote access) is left alone.
+        if (isFinishing && autoStartedTunnel) {
+            val appContext = applicationContext
+            Thread { runCatching { runBlocking { TunnelController.disconnect(appContext) } } }.start()
+        }
         super.onDestroy()
     }
 
@@ -262,17 +277,95 @@ class WebViewActivity : AppCompatActivity() {
         }
     }
 
-    // --- Offline handling & reconnect ----------------------------------------
+    // --- Auto-switch: direct vs. tunnel --------------------------------------
+
+    /**
+     * Decides how to reach the dashboard, then loads it:
+     *  1. Reachable now (LAN, or via a VPN you already run)? Load directly.
+     *  2. Not reachable but Sola's tunnel is set up? Bring it up, then load.
+     *  3. Otherwise show the offline screen.
+     */
+    private fun connectAndLoad() {
+        loadFailed = false
+        showConnecting(getString(R.string.connecting_checking))
+        lifecycleScope.launch {
+            // Try direct first, with retries — a transient/cold-start miss must not
+            // trigger an unnecessary tunnel (a false "unreachable" is expensive).
+            if (isReachableRetrying(DIRECT_PROBE_ATTEMPTS, DIRECT_PROBE_GAP_MS)) {
+                loadDashboard()
+                return@launch
+            }
+            if (WireGuardConfigStore.hasConfig(this@WebViewActivity) && tryBringTunnelUp()) {
+                showConnecting(getString(R.string.connecting_tunnel))
+                if (isReachableRetrying(TUNNEL_PROBE_ATTEMPTS, TUNNEL_PROBE_GAP_MS)) {
+                    loadDashboard()
+                    return@launch
+                }
+            }
+            showOffline()
+        }
+    }
+
+    /** Brings Sola's tunnel up if possible. Returns true only if it's now up. */
+    private suspend fun tryBringTunnelUp(): Boolean {
+        val state = withContext(Dispatchers.IO) {
+            TunnelController.currentState(this@WebViewActivity)
+        }
+        if (state == Tunnel.State.UP) return true
+        // Can't take the single VPN slot if another VPN holds it, and can't
+        // silently connect without prior consent (granted once via Remote access).
+        if (isAnotherVpnActive()) return false
+        if (VpnService.prepare(this) != null) return false
+        val config = WireGuardConfigStore.load(this) ?: return false
+        return runCatching {
+            val up = TunnelController.connect(this, config) == Tunnel.State.UP
+            if (up) autoStartedTunnel = true
+            up
+        }.getOrDefault(false)
+    }
+
+    /** Probes reachability up to [attempts] times (with a gap between), so a
+     *  transient miss or a settling tunnel handshake doesn't read as unreachable. */
+    private suspend fun isReachableRetrying(attempts: Int, gapMs: Long): Boolean {
+        repeat(attempts) { i ->
+            if (Reachability.isReachable(dashboardUrl, PROBE_TIMEOUT_MS)) return true
+            if (i < attempts - 1) delay(gapMs)
+        }
+        return false
+    }
+
+    private fun isAnotherVpnActive(): Boolean {
+        val cm = connectivityManager ?: return false
+        return cm.allNetworks.any { network ->
+            cm.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
+    }
+
+    private fun loadDashboard() {
+        loadFailed = false
+        // Keep the connecting overlay up until the page finishes (or errors).
+        binding.webView.loadUrl(dashboardUrl)
+    }
+
+    // --- Offline / connecting overlays ---------------------------------------
+
+    private fun showConnecting(message: String) {
+        binding.connectingStatus.text = message
+        binding.offlineView.visibility = View.GONE
+        binding.connectingView.visibility = View.VISIBLE
+    }
 
     private fun showOffline() {
         binding.offlineUrl.text = dashboardUrl
         binding.buttonRetry.isEnabled = true
         binding.buttonRetry.text = getString(R.string.offline_retry)
         binding.webProgress.visibility = View.GONE
+        binding.connectingView.visibility = View.GONE
         binding.offlineView.visibility = View.VISIBLE
     }
 
     private fun showContent() {
+        binding.connectingView.visibility = View.GONE
         binding.offlineView.visibility = View.GONE
     }
 
@@ -282,10 +375,7 @@ class WebViewActivity : AppCompatActivity() {
             recreate()
             return
         }
-        loadFailed = false
-        binding.buttonRetry.isEnabled = false
-        binding.buttonRetry.text = getString(R.string.offline_reconnecting)
-        binding.webView.loadUrl(dashboardUrl)
+        connectAndLoad()
     }
 
     private fun changeServer() {
@@ -341,5 +431,12 @@ class WebViewActivity : AppCompatActivity() {
         private const val MENU_REMOTE_ACCESS = 2
         private const val MENU_CHANGE_SERVER = 3
         private const val AUTO_HIDE_MS = 3500L
+        private const val PROBE_TIMEOUT_MS = 3000
+        // Direct-path probe: retry a few times before falling back to the tunnel.
+        private const val DIRECT_PROBE_ATTEMPTS = 3
+        private const val DIRECT_PROBE_GAP_MS = 600L
+        // After bringing the tunnel up: give the handshake/route time to settle.
+        private const val TUNNEL_PROBE_ATTEMPTS = 6
+        private const val TUNNEL_PROBE_GAP_MS = 1000L
     }
 }
