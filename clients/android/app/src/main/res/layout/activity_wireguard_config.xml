@@ -9,11 +9,11 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="@color/sola_primary"
+        android:background="@color/sola_primary_dark"
         android:theme="@style/ThemeOverlay.Sola.Toolbar"
         app:navigationIcon="@drawable/ic_arrow_back"
         app:title="@string/wg_title"
-        app:titleTextColor="@color/sola_on_primary" />
+        app:titleTextColor="@color/white" />
 
     <ScrollView
         android:layout_width="match_parent"

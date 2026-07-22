@@ -7,13 +7,13 @@
         <item name="android:statusBarColor">@color/sola_primary_dark</item>
     </style>
 
-    <!-- Keeps the toolbar overflow icon dark on the blue bar in both light and
-         dark mode (default control color would flip with the theme). The title
-         color is set directly via app:titleTextColor in the layout. NOTE: we do
-         NOT override textColorPrimary here — doing so leaks into the overflow
-         popup and makes its menu text unreadable. -->
+    <!-- Toolbar icons (overflow, back arrow) are white to sit on the dark-blue
+         bar and match the status-bar icons above it. The title color is set
+         directly via app:titleTextColor in the layout. NOTE: we do NOT override
+         textColorPrimary here — doing so leaks into the overflow popup and makes
+         its menu text unreadable. -->
     <style name="ThemeOverlay.Sola.Toolbar" parent="ThemeOverlay.Material3.Toolbar.Surface">
-        <item name="colorControlNormal">@color/sola_on_primary</item>
+        <item name="colorControlNormal">@color/white</item>
     </style>
 
     <!-- Standard popup styling so the overflow menu uses readable default
