@@ -1,0 +1,41 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="150dp"
+    android:height="64dp"
+    android:viewportWidth="150"
+    android:viewportHeight="64">
+    <!--
+        "Sola" wordmark for the toolbar — matches the web page's logo.svg
+        (blue "S" mark + light "ola"). Used unconditionally (not theme-qualified)
+        because the toolbar is always the dark-blue bar in both light and dark mode.
+    -->
+    <path
+        android:pathData="M45,18C29,13 21,27 32,32C43,37 35,51 19,46"
+        android:strokeColor="#2E8BFF"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M59,36 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0"
+        android:strokeColor="#F5F7FA"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M95,17 L95,47"
+        android:strokeColor="#F5F7FA"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M109,36 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0"
+        android:strokeColor="#F5F7FA"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M131,25 L131,47"
+        android:strokeColor="#F5F7FA"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

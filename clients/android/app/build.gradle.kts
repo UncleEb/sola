@@ -21,8 +21,8 @@ android {
         applicationId = "dev.uncleeb.sola"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 9
+        versionName = "1.8"
     }
 
     signingConfigs {

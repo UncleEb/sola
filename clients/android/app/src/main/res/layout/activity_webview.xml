@@ -136,10 +136,16 @@
         android:visibility="gone"
         android:theme="@style/ThemeOverlay.Sola.Toolbar"
         app:popupTheme="@style/ThemeOverlay.Sola.Popup"
-        app:title="@string/app_name"
-        app:titleTextColor="@color/white"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ImageView
+            android:layout_width="wrap_content"
+            android:layout_height="26dp"
+            android:adjustViewBounds="true"
+            android:src="@drawable/logo_wordmark"
+            android:contentDescription="@string/app_name" />
+    </com.google.android.material.appbar.MaterialToolbar>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

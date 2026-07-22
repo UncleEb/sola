@@ -85,6 +85,9 @@ class WebViewActivity : AppCompatActivity() {
         dashboardUrl = url
 
         setSupportActionBar(binding.toolbar)
+        // The logo ImageView in the toolbar is our title — suppress the action
+        // bar's auto title text (the activity label) so "Sola" doesn't show twice.
+        supportActionBar?.setDisplayShowTitleEnabled(false)
         toolbarHeightPx = resolveActionBarSize()
         setupRevealGesture()
         configureWebView()
