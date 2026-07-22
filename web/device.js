@@ -142,7 +142,7 @@ els.form.addEventListener("submit", async (e) => {
             return;
         }
 
-        location.href = "/devices";
+        location.href = "/settings";
     } catch (err) {
         showError(`Request failed: ${err.message}`);
         els.submit.disabled = false;

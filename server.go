@@ -18,7 +18,7 @@ import (
 // collector a single deployable binary: there are no loose files to lose or
 // keep in sync on the target machine.
 //
-//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/devices.html web/devices.js web/device.html web/device.js web/settings.html web/settings.js web/history.html web/history.js
+//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/device.html web/device.js web/settings.html web/settings.js web/history.html web/history.js
 var webFiles embed.FS
 
 // assetFiles holds the Sola brand assets (logo, icons, favicons), served under
@@ -145,11 +145,16 @@ func (s *dashboardServer) routes() http.Handler {
 
 	pages := map[string]string{
 		"/":         "/solar_dashboard.html",
-		"/devices":  "/devices.html",
 		"/device":   "/device.html",
 		"/settings": "/settings.html",
 		"/history":  "/history.html",
 	}
+
+	// The devices list now lives inside the Settings page; keep the old path
+	// working by redirecting it there.
+	mux.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/settings", http.StatusFound)
+	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if file, ok := pages[r.URL.Path]; ok {
