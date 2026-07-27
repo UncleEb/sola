@@ -2,8 +2,13 @@
 
 // Device form: adds a new device (POST) or edits an existing one (PUT) when the
 // URL carries ?id=N. It writes through the API, which rewrites config.json; the
-// collector applies the change on its next poll. The type dropdown reveals the
-// fields relevant to that device type.
+// collector applies the change on its next poll.
+//
+// Every device reads from a named data source (Settings → Data Sources). The
+// device type decides which source type is compatible — Modbus for
+// shunt/charge_controller/system, MadBus for energy_meter — so the Source
+// dropdown is filtered to compatible sources, and the selected source's type
+// (not the device type) decides whether we ask for a Modbus unit or a MadBus id.
 
 const params = new URLSearchParams(location.search);
 const editId = params.has("id") ? Number(params.get("id")) : null;
@@ -14,14 +19,27 @@ const els = {
     title: document.getElementById("form-title"),
     type: document.getElementById("device_type"),
     name: document.getElementById("name"),
+    source: document.getElementById("source"),
+    sourceHint: document.getElementById("source-hint"),
     modbusUnit: document.getElementById("modbus_unit"),
     aggregate: document.getElementById("aggregate"),
     maxAmperage: document.getElementById("max_amperage"),
-    source: document.getElementById("source"),
     madbusId: document.getElementById("madbus_id"),
+    madbusHint: document.getElementById("madbus-hint"),
     error: document.getElementById("form-error"),
     submit: document.getElementById("submit-btn"),
 };
+
+// All sources fetched from the API, and the type each device type requires.
+let allSources = [];
+
+// The MadBus device id we'd like selected once the picker is (re)loaded — the
+// existing id in edit mode, cleared whenever the source changes.
+let desiredMadbusId = "";
+
+function compatibleSourceType(deviceType) {
+    return deviceType === "energy_meter" ? "madbus" : "modbus";
+}
 
 function typeDefaultName() {
     switch (els.type.value) {
@@ -36,16 +54,139 @@ function typeDefaultName() {
     }
 }
 
-// Show only the fields that apply to the selected device type: the aggregate
-// checkbox is shunt-only, max amperage is charger-only, a System device takes
-// neither. An energy meter is MadBus-sourced, so it hides the Modbus field and
-// shows the MadBus source + device id instead.
+// Fill the Source dropdown with the sources compatible with the current device
+// type. When none exist, disable the form and point the user at Settings.
+function populateSources(selected) {
+    const want = compatibleSourceType(els.type.value);
+    const compatible = allSources.filter((s) => s.type === want);
+
+    els.source.innerHTML = compatible
+        .map((s) => `<option value="${escapeAttr(s.name)}">${escapeAttr(s.name)}</option>`)
+        .join("");
+
+    if (compatible.length === 0) {
+        const label = want === "madbus" ? "MadBus" : "Modbus";
+        els.sourceHint.textContent = `No ${label} data source configured. Add one under Settings → Data Sources first.`;
+        els.source.disabled = true;
+        els.submit.disabled = true;
+        return;
+    }
+
+    els.source.disabled = false;
+    els.submit.disabled = false;
+    els.sourceHint.textContent = "The source Sola reads this device from. Manage sources under Settings → Data Sources.";
+
+    if (selected && compatible.some((s) => s.name === selected)) {
+        els.source.value = selected;
+    }
+}
+
+function selectedSource() {
+    return allSources.find((s) => s.name === els.source.value);
+}
+
+function escapeAttr(value) {
+    return String(value).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+    }[c]));
+}
+
+// Show only the fields that apply. The aggregate checkbox is shunt-only and max
+// amperage is charger-only (both driven by device type). The Modbus unit vs.
+// MadBus id field is driven by the *selected source's* type.
 function syncTypeFields() {
     const type = els.type.value;
     document.querySelectorAll(".field--shunt").forEach((e) => (e.hidden = type !== "shunt"));
     document.querySelectorAll(".field--charger").forEach((e) => (e.hidden = type !== "charge_controller"));
-    document.querySelectorAll(".field--meter").forEach((e) => (e.hidden = type !== "energy_meter"));
-    document.querySelectorAll(".field--modbus").forEach((e) => (e.hidden = type === "energy_meter"));
+}
+
+function syncSourceFields() {
+    const src = selectedSource();
+    const isMadbus = src && src.type === "madbus";
+    document.querySelectorAll(".field--modbus").forEach((e) => (e.hidden = isMadbus));
+    document.querySelectorAll(".field--madbus").forEach((e) => (e.hidden = !isMadbus));
+    if (isMadbus) {
+        loadMadbusDevices();
+    }
+}
+
+// Populate the MadBus device picker from the selected source. Sola polls the
+// source server-side (GET /api/sources/{name}/devices), so the browser never
+// talks to MadBus directly. When the source can't be reached we degrade
+// gracefully: in edit mode we keep the existing id so a save still works; in add
+// mode we disable submit and explain why.
+async function loadMadbusDevices() {
+    const src = selectedSource();
+    if (!src || src.type !== "madbus") {
+        return;
+    }
+
+    els.madbusId.innerHTML = `<option value="">Loading…</option>`;
+    els.madbusId.disabled = true;
+    els.submit.disabled = true;
+
+    try {
+        const resp = await fetch(`/api/sources/${encodeURIComponent(src.name)}/devices`, { cache: "no-store" });
+        if (!resp.ok) {
+            throw new Error((await resp.text()).trim() || `HTTP ${resp.status}`);
+        }
+        renderMadbusOptions(await resp.json(), null);
+    } catch (err) {
+        renderMadbusOptions(null, err.message);
+    }
+}
+
+function renderMadbusOptions(devices, errMsg) {
+    const want = desiredMadbusId;
+
+    // Unreachable source: keep the existing id (edit) so the form still saves,
+    // otherwise there's nothing to pick.
+    if (errMsg !== null) {
+        if (want) {
+            els.madbusId.innerHTML = `<option value="${escapeAttr(want)}">${escapeAttr(want)} (source unreachable)</option>`;
+            els.madbusId.disabled = false;
+            els.submit.disabled = false;
+        } else {
+            els.madbusId.innerHTML = `<option value="">No devices — source unreachable</option>`;
+            els.madbusId.disabled = true;
+            els.submit.disabled = true;
+        }
+        els.madbusHint.textContent = `Couldn't list devices from this source: ${errMsg}`;
+        return;
+    }
+
+    const list = devices || [];
+    const options = list.map((d) => {
+        const label = d.name ? `${d.name} — ${d.id}` : d.id;
+        const suffix = d.online ? "" : " (offline)";
+        return `<option value="${escapeAttr(d.id)}">${escapeAttr(label)}${suffix}</option>`;
+    });
+
+    // Preserve a configured id that the source isn't currently reporting so an
+    // edit doesn't silently drop it.
+    if (want && !list.some((d) => d.id === want)) {
+        options.unshift(`<option value="${escapeAttr(want)}">${escapeAttr(want)} (not currently reported)</option>`);
+    }
+
+    if (options.length === 0) {
+        els.madbusId.innerHTML = `<option value="">No devices reported</option>`;
+        els.madbusId.disabled = true;
+        els.submit.disabled = true;
+        els.madbusHint.textContent = "This MadBus source isn't reporting any devices yet.";
+        return;
+    }
+
+    els.madbusId.innerHTML = options.join("");
+    els.madbusId.disabled = false;
+    els.submit.disabled = false;
+    if (want) {
+        els.madbusId.value = want;
+    }
+    els.madbusHint.textContent = "Choose a device reported by the selected MadBus source.";
 }
 
 function showError(message) {
@@ -60,8 +201,16 @@ function hideError() {
 let nameEdited = false;
 els.name.addEventListener("input", () => (nameEdited = true));
 
+els.source.addEventListener("change", () => {
+    // A different source reports different devices, so drop any remembered id.
+    desiredMadbusId = "";
+    syncSourceFields();
+});
+
 els.type.addEventListener("change", () => {
     syncTypeFields();
+    populateSources();
+    syncSourceFields();
     if (editing) {
         return;
     }
@@ -78,7 +227,22 @@ els.type.addEventListener("change", () => {
     }
 });
 
+async function fetchSources() {
+    try {
+        const resp = await fetch("/api/sources", { cache: "no-store" });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        allSources = await resp.json();
+    } catch (err) {
+        showError(`Failed to load data sources: ${err.message}`);
+        allSources = [];
+    }
+}
+
 async function init() {
+    await fetchSources();
+
     if (editing) {
         els.title.textContent = "Edit Device";
         els.submit.textContent = "Save Changes";
@@ -103,17 +267,23 @@ async function init() {
             els.aggregate.checked = Boolean(device.aggregate);
             els.maxAmperage.value =
                 device.max_amperage === null || device.max_amperage === undefined ? "" : device.max_amperage;
-            els.source.value = device.source || "";
-            els.madbusId.value = device.madbus_id || "";
+            desiredMadbusId = device.madbus_id || ""; // preselected once the picker loads
+
+            syncTypeFields();
+            populateSources(device.source);
+            syncSourceFields();
+            return;
         } catch (err) {
             showError(`Failed to load device: ${err.message}`);
             els.submit.disabled = true;
+            return;
         }
-    } else {
-        els.name.value = typeDefaultName();
     }
 
+    els.name.value = typeDefaultName();
     syncTypeFields();
+    populateSources();
+    syncSourceFields();
 }
 
 els.form.addEventListener("submit", async (e) => {
@@ -121,21 +291,34 @@ els.form.addEventListener("submit", async (e) => {
     hideError();
 
     const type = els.type.value;
+    const src = selectedSource();
+    if (!src) {
+        showError("Select a data source. Add one under Settings → Data Sources if none are listed.");
+        return;
+    }
+
     const device = {
         name: els.name.value.trim(),
         device_type: type,
-        modbus_unit: els.modbusUnit.value === "" ? null : Number(els.modbusUnit.value),
+        source: src.name,
     };
+
+    if (src.type === "madbus") {
+        // MadBus-sourced: no Modbus unit; carries a madbus_id instead.
+        device.modbus_unit = null;
+        device.madbus_id = els.madbusId.value.trim();
+        if (!device.madbus_id) {
+            showError("Select a MadBus device. If none are listed, check that the source is reachable under Settings → Data Sources.");
+            return;
+        }
+    } else {
+        device.modbus_unit = els.modbusUnit.value === "" ? null : Number(els.modbusUnit.value);
+    }
 
     if (type === "shunt") {
         device.aggregate = els.aggregate.checked;
     } else if (type === "charge_controller" && els.maxAmperage.value !== "") {
         device.max_amperage = Number(els.maxAmperage.value);
-    } else if (type === "energy_meter") {
-        // MadBus-sourced: no Modbus unit; carries a source + madbus_id instead.
-        device.modbus_unit = null;
-        device.source = els.source.value.trim();
-        device.madbus_id = els.madbusId.value.trim();
     }
     // A system device carries neither an aggregate flag nor max amperage.
 

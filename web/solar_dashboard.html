@@ -54,13 +54,11 @@
             </div>
         </section>
 
-        <!-- AC energy meters (MadBus-sourced) -->
-        <section class="panel" id="meters-panel">
-            <h2 class="panel__title">Energy Meters</h2>
-            <div id="meters" class="banks">
-                <p class="empty">Waiting for data…</p>
-            </div>
-        </section>
+        <!-- AC energy meters (MadBus-sourced). Each meter gets its own full-width
+             pane (they usually monitor different parts of the system), rendered
+             into this container by dashboard.js.
+             Movable/reorderable panes are a planned feature — see TODO.md. -->
+        <div id="meters" class="meters"></div>
     </main>
 
     <footer class="footer">

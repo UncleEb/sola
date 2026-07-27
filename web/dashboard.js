@@ -29,7 +29,6 @@ const els = {
     aggregate: document.getElementById("aggregate"),
     banksPanel: document.getElementById("banks-panel"),
     banks: document.getElementById("banks"),
-    metersPanel: document.getElementById("meters-panel"),
     meters: document.getElementById("meters"),
     lastUpdate: document.getElementById("last-update"),
 };
@@ -381,37 +380,38 @@ function bankCard(bank) {
         </div>`;
 }
 
-// AC energy meters (MadBus-sourced). Rendered as cards like the battery banks.
+// AC energy meters (MadBus-sourced). Each meter is its own full-width pane —
+// meters usually watch different parts of the system, so they don't belong
+// crammed together like the battery banks. The container simply holds zero or
+// more panes (and is empty, showing nothing, when there are no meters).
 function renderMeters(meters) {
-    const list = meters || [];
-    if (list.length === 0) {
-        setPanelVisible(els.metersPanel, false);
-        return;
-    }
-    setPanelVisible(els.metersPanel, true);
-    els.meters.innerHTML = list.map(meterCard).join("");
+    els.meters.innerHTML = (meters || []).map(meterPanel).join("");
 }
 
-function meterCard(m) {
+function meterPanel(m) {
     // status is "online" | "stale" | "offline"; anything else reads as offline.
     let state = m.status === "online" || m.status === "stale" ? m.status : "offline";
     const stateText = state === "online" ? "Online" : state === "stale" ? "Stale" : "Offline";
 
     return `
-        <div class="bank bank--${state} clickable" data-device-id="${m.id}">
-            <div class="bank__head">
-                <span class="bank__name">${m.name}</span>
+        <section class="panel panel--${state} clickable" data-device-id="${m.id}">
+            <div class="meter__head">
+                <h2 class="panel__title meter__title">${m.name}</h2>
                 <span class="status-dot status-dot--${state}">${stateText}</span>
             </div>
-            <div class="bank__readings">
+            <div class="reading-grid">
                 ${reading(m.power, 1, "W", "Power", "pv")}
                 ${reading(m.voltage, 1, "V", "Voltage")}
                 ${reading(m.current, 2, "A", "Current")}
                 ${reading(m.frequency, 2, "Hz", "Frequency")}
                 ${reading(m.power_factor, 3, "", "Power Factor")}
+                ${reading(m.apparent_power, 1, "VA", "Apparent Power")}
+                ${reading(m.reactive_power, 1, "var", "Reactive Power")}
+                ${reading(m.energy_import, 2, "kWh", "Imported", "battery")}
+                ${reading(m.energy_export, 2, "kWh", "Exported", "pv")}
                 ${reading(m.energy_total, 2, "kWh", "Total Energy", "battery")}
             </div>
-        </div>`;
+        </section>`;
 }
 
 function setConnection(kind, text) {

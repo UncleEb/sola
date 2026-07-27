@@ -185,6 +185,119 @@ devicesSection.addEventListener("toggle", () => {
     }
 }, { once: true });
 
+// --- Data Sources (collapsible) ----------------------------------------------
+//
+// A source is a place Sola reads from: the Victron Modbus link (type "modbus")
+// or a MadBus HTTP endpoint (type "madbus"). Devices reference a source by name.
+// Same lazy-load + delete pattern as Registered Devices; deleting a source that
+// a device still references is refused by the API with a 400.
+
+const sourcesEl = document.getElementById("sources");
+const sourcesSection = document.getElementById("sources-section");
+
+const SOURCE_TYPE_LABELS = {
+    modbus: "Victron (Modbus)",
+    madbus: "MadBus",
+};
+
+function sourceRow(s) {
+    const type = SOURCE_TYPE_LABELS[s.type] || s.type;
+    const meta = [type, s.url].join(" · ");
+
+    return `
+        <div class="device-row" data-name="${escapeHtml(s.name)}" role="button" tabindex="0">
+            <div class="device-row__main">
+                <span class="device-row__name">${escapeHtml(s.name)}</span>
+                <span class="device-row__meta">${escapeHtml(meta)}</span>
+            </div>
+            <button type="button" class="icon-btn icon-btn--danger device-row__delete"
+                    data-name="${escapeHtml(s.name)}" aria-label="Delete ${escapeHtml(s.name)}" title="Delete">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 6h18"/>
+                    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/>
+                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+                    <path d="M10 11v6"/>
+                    <path d="M14 11v6"/>
+                </svg>
+            </button>
+        </div>`;
+}
+
+function renderSources(sources) {
+    if (!sources || sources.length === 0) {
+        sourcesEl.innerHTML = `<p class="empty">No data sources configured yet. Use “Add Source” to create one.</p>`;
+        return;
+    }
+    sourcesEl.innerHTML = sources.map(sourceRow).join("");
+}
+
+async function loadSources() {
+    try {
+        const resp = await fetch("/api/sources", { cache: "no-store" });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        renderSources(await resp.json());
+    } catch (err) {
+        sourcesEl.innerHTML = `<p class="empty">Failed to load sources: ${escapeHtml(err.message)}</p>`;
+    }
+}
+
+async function removeSource(name) {
+    if (!confirm(`Delete data source “${name}”? Devices that read from it must be reassigned or deleted first.`)) {
+        return;
+    }
+
+    try {
+        const resp = await fetch(`/api/sources/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!resp.ok) {
+            alert(`Delete failed: ${(await resp.text()).trim() || `HTTP ${resp.status}`}`);
+            return;
+        }
+    } catch (err) {
+        alert(`Delete failed: ${err.message}`);
+        return;
+    }
+
+    loadSources();
+}
+
+function editSourceFromRow(row) {
+    location.href = `/source?name=${encodeURIComponent(row.dataset.name)}`;
+}
+
+sourcesEl.addEventListener("click", (e) => {
+    const del = e.target.closest(".device-row__delete");
+    if (del) {
+        e.stopPropagation();
+        removeSource(del.dataset.name);
+        return;
+    }
+
+    const row = e.target.closest(".device-row");
+    if (row) {
+        editSourceFromRow(row);
+    }
+});
+
+sourcesEl.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") {
+        return;
+    }
+    const row = e.target.closest(".device-row");
+    if (row) {
+        e.preventDefault();
+        editSourceFromRow(row);
+    }
+});
+
+sourcesSection.addEventListener("toggle", () => {
+    if (sourcesSection.open) {
+        loadSources();
+    }
+}, { once: true });
+
 // --- init --------------------------------------------------------------------
 
 loadSettings();

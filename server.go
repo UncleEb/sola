@@ -18,7 +18,7 @@ import (
 // collector a single deployable binary: there are no loose files to lose or
 // keep in sync on the target machine.
 //
-//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/device.html web/device.js web/settings.html web/settings.js web/history.html web/history.js
+//go:embed web/solar_dashboard.html web/style.css web/dashboard.js web/background.js web/device.html web/device.js web/source.html web/source.js web/settings.html web/settings.js web/history.html web/history.js
 var webFiles embed.FS
 
 // assetFiles holds the Sola brand assets (logo, icons, favicons), served under
@@ -113,6 +113,15 @@ func (s *dashboardServer) routes() http.Handler {
 	mux.HandleFunc("PUT /api/devices/{id}", s.handleUpdateDevice)
 	mux.HandleFunc("DELETE /api/devices/{id}", s.handleDeleteDevice)
 
+	// Data source (Modbus/MadBus) CRUD — same write path as devices.
+	mux.HandleFunc("GET /api/sources", s.handleListSources)
+	mux.HandleFunc("POST /api/sources", s.handleCreateSource)
+	mux.HandleFunc("PUT /api/sources/{name}", s.handleUpdateSource)
+	mux.HandleFunc("DELETE /api/sources/{name}", s.handleDeleteSource)
+	// Live device discovery for a MadBus source (populates the device form's
+	// MadBus device-id picker). Server-side so no CORS is involved.
+	mux.HandleFunc("GET /api/sources/{name}/devices", s.handleListSourceDevices)
+
 	// Display settings (currently just the background).
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
@@ -146,6 +155,7 @@ func (s *dashboardServer) routes() http.Handler {
 	pages := map[string]string{
 		"/":         "/solar_dashboard.html",
 		"/device":   "/device.html",
+		"/source":   "/source.html",
 		"/settings": "/settings.html",
 		"/history":  "/history.html",
 	}
@@ -660,6 +670,184 @@ func (s *dashboardServer) handleDeleteDevice(w http.ResponseWriter, r *http.Requ
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- Data source API -----------------------------------------------------
+//
+// Sources (the Victron Modbus link + MadBus endpoints) share the device write
+// path: rewrite config.json atomically under writeMu, and the poll loop applies
+// the change on its next cycle. validate() enforces the schema rules (unique
+// name, known type, non-empty URL, at most one modbus source, device→source
+// type compatibility) inside persist, so these handlers stay thin.
+
+func (s *dashboardServer) handleListSources(w http.ResponseWriter, r *http.Request) {
+	srcs := s.currentConfig().Sources
+	if srcs == nil {
+		srcs = []Source{}
+	}
+	writeJSON(w, srcs)
+}
+
+func (s *dashboardServer) handleCreateSource(w http.ResponseWriter, r *http.Request) {
+	var src Source
+	if err := json.NewDecoder(r.Body).Decode(&src); err != nil {
+		http.Error(w, "invalid source JSON", http.StatusBadRequest)
+		return
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	cfg.Sources = append(cfg.Sources, src)
+	if !s.persist(w, cfg) { // validate() rejects dup/empty name, bad type, 2nd modbus
+		return
+	}
+
+	writeJSON(w, src)
+}
+
+func (s *dashboardServer) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	var src Source
+	if err := json.NewDecoder(r.Body).Decode(&src); err != nil {
+		http.Error(w, "invalid source JSON", http.StatusBadRequest)
+		return
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	idx := -1
+	for i := range cfg.Sources {
+		if cfg.Sources[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+
+	// Name is immutable on edit — devices reference it by name (mirrors the
+	// device handler keeping ID/DeviceType fixed). Only type/url may change.
+	src.Name = name
+	cfg.Sources[idx] = src
+	if !s.persist(w, cfg) {
+		return
+	}
+
+	writeJSON(w, src)
+}
+
+func (s *dashboardServer) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cfg, ok := s.loadForWrite(w)
+	if !ok {
+		return
+	}
+
+	// Refuse to delete a source still referenced by a device, with a clear
+	// message. (validate() would also reject it, but generically.)
+	inUse := 0
+	for _, d := range cfg.Devices {
+		if d.Source == name {
+			inUse++
+		}
+	}
+	if inUse > 0 {
+		http.Error(w, fmt.Sprintf("source %q is used by %d device(s); reassign or delete them first", name, inUse), http.StatusBadRequest)
+		return
+	}
+
+	kept := make([]Source, 0, len(cfg.Sources))
+	found := false
+	for _, src := range cfg.Sources {
+		if src.Name == name {
+			found = true
+			continue
+		}
+		kept = append(kept, src)
+	}
+	if !found {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+	cfg.Sources = kept
+
+	if !s.persist(w, cfg) {
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// madbusDeviceJSON is one device a MadBus source reports, as offered to the
+// device form's MadBus id picker.
+type madbusDeviceJSON struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Profile string `json:"profile"`
+	Online  bool   `json:"online"`
+}
+
+// handleListSourceDevices polls a MadBus source for every device it serves so the
+// device form can offer them in a dropdown instead of asking the user to type a
+// raw id. Sola makes the call server-side (no CORS), and a source that can't be
+// reached yields 502 with the reason so the form can explain it.
+func (s *dashboardServer) handleListSourceDevices(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	var src Source
+	found := false
+	for _, so := range s.currentConfig().Sources {
+		if so.Name == name {
+			src = so
+			found = true
+			break
+		}
+	}
+	if !found {
+		http.Error(w, "source not found", http.StatusNotFound)
+		return
+	}
+	if src.Type != SourceTypeMadbus {
+		http.Error(w, "device discovery is only supported for MadBus sources", http.StatusBadRequest)
+		return
+	}
+
+	devs, err := madbusMeasurements(src.URL, nil) // nil selector = all devices
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not reach MadBus source %q: %v", name, err), http.StatusBadGateway)
+		return
+	}
+
+	out := make([]madbusDeviceJSON, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, madbusDeviceJSON{
+			ID:      d.Device.ID,
+			Name:    d.Device.Name,
+			Profile: d.Device.Profile,
+			Online:  d.Device.Online,
+		})
+	}
+
+	writeJSON(w, out)
 }
 
 // settingsBody is the display-settings payload exchanged with the client.

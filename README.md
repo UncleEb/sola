@@ -39,13 +39,12 @@ The project is built incrementally. Every feature earns its place, and unnecessa
 ### Docker (recommended)
 
 ```bash
-# Point MODBUS_URL in docker-compose.yml at your Venus OS device, then:
 docker compose up -d --build
 ```
 
 The dashboard is then at **http://localhost:8088**.
 
-`config.json` and the SQLite database live in a named volume (`sola-data`, mounted at `/data`) and persist across restarts and upgrades. On first run against an empty volume, Sola writes a default `config.json` you can edit directly or manage from the dashboard. The `MODBUS_URL` environment variable overrides `modbus_url`, so you can point the container at your device without editing the file.
+`config.json` and the SQLite database live in a named volume (`sola-data`, mounted at `/data`) and persist across restarts and upgrades. On first run against an empty volume, Sola writes a default `config.json`. Point Sola at your hardware from the dashboard under **Settings → Data Sources**: edit the seeded `victron` source to your Venus OS Modbus TCP endpoint, and add MadBus sources as needed.
 
 The container runs as uid `65532`. A named volume gets writable ownership automatically; a bind mount (`-v /host/path:/data`) must be writable by uid `65532`. The image ships a `HEALTHCHECK` that runs `sola healthcheck` (which probes `/api/status` — the distroless image has no shell or curl).
 
@@ -60,10 +59,10 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ```bash
 go build -o sola .
-MODBUS_URL=tcp://<venus-ip>:502 ./sola
+./sola
 ```
 
-Then open **http://localhost:8088**.
+Then open **http://localhost:8088** and set your data sources under Settings → Data Sources.
 
 ## Configuration
 
@@ -72,20 +71,22 @@ Settings live in `config.json` and are **reloaded on every poll**, with a last-g
 | Key | Purpose |
 |-----|---------|
 | `http_addr` | Dashboard listen address (default `:8088`). |
-| `modbus_url` | Venus OS Modbus TCP endpoint, e.g. `tcp://192.168.1.50:502`. |
+| `sources` | Data sources Sola reads from, each `{name, type, url}`. `type` is `modbus` (a Venus OS Modbus TCP endpoint, e.g. `tcp://192.168.1.50:502`) or `madbus` (a MadBus HTTP endpoint, e.g. `http://192.168.1.60:8090`). Devices reference a source by name. One `modbus` source is supported in this version. |
 | `database_path` | Path to the SQLite database file. |
-| `poll_interval_seconds` | How often to poll Modbus (default 5). |
+| `poll_interval_seconds` | How often to poll (default 5). |
 | `history_interval_seconds` | How often to snapshot history (default 15). |
 | `debug` | When true, per-poll readings print to the terminal. |
 | `max_amperage` | Full-scale reference used by the dashboard gauges. |
 | `soc_low_percent` | State-of-charge threshold for low-battery styling. |
-| `devices` | Device definitions (id, name, `modbus_unit`, `device_type`, enabled). |
+| `devices` | Device definitions (id, name, `source`, `device_type`, plus `modbus_unit` or `madbus_id`, enabled). |
+
+Legacy configs using the old top-level `modbus_url` and `madbus` keys are migrated to `sources` automatically on first start.
 
 Environment overrides:
 
 | Variable | Effect |
 |----------|--------|
-| `MODBUS_URL` | Overrides `modbus_url` (handy for containers). |
+| `MODBUS_URL` | Overrides the `modbus` source's URL for this run (handy for containers). |
 | `SOLA_CONFIG_DIR` | Directory holding `config.json` and the database. |
 
 ## HTTP API
@@ -98,6 +99,10 @@ Environment overrides:
 | `POST /api/devices` | Add a device. |
 | `PUT /api/devices/{id}` | Update a device. |
 | `DELETE /api/devices/{id}` | Remove a device. |
+| `GET /api/sources` | List configured data sources. |
+| `POST /api/sources` | Add a data source. |
+| `PUT /api/sources/{name}` | Update a data source. |
+| `DELETE /api/sources/{name}` | Remove a data source (refused if a device still references it). |
 | `GET /api/settings` | Read current settings. |
 | `PUT /api/settings` | Update settings. |
 
@@ -166,13 +171,9 @@ If a future maintainer (or myself in five years) cannot quickly understand how a
 
 ## Roadmap
 
-Phases 1–5 (stable polling, SQLite storage, live-reloaded config, HTTP API, and the web UI) are substantially complete. Likely next:
+Phases 1–5 (stable polling, SQLite storage, live-reloaded config, HTTP API, and the web UI) are substantially complete, and Sola now ingests from multiple data sources (Victron Modbus + MadBus) managed from the web UI.
 
-- Retention / pruning for the history tables (currently keep-everything).
-- Metrics and health endpoints for external monitoring.
-- Support for non-Victron and additional data sources.
-- Formal database migrations once the schema needs to change.
-- iOS client.
+The living backlog — planned features and outstanding work — lives in [TODO.md](TODO.md). Highlights on deck: multiple concurrent Modbus sources, more MadBus device types, an embedded WireGuard tunnel, history retention, and an iOS client.
 
 ## Long-term vision
 

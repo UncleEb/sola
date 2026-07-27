@@ -98,7 +98,7 @@ type SolarCharger struct {
 type EnergyMeter struct {
 	ID       int
 	Name     string
-	Source   string // MadBus instance name (config.MadbusInstance.Name)
+	Source   string // MadBus source name (Config.Sources[].Name, type madbus)
 	MadbusID string // device id within that instance
 }
 
@@ -127,9 +127,17 @@ func main() {
 		os.Exit(1)
 	} else if created {
 		logger.Info(
-			"wrote default configuration; set MODBUS_URL (or edit the file) and add your devices in the dashboard",
+			"wrote default configuration; edit the victron source in Settings → Data Sources and add your devices in the dashboard",
 			"path", path,
 		)
+	}
+
+	// One-time on-disk upgrade of a legacy (pre-sources) config to the sources
+	// schema, so the file a human reads matches what the code expects. LoadConfig
+	// also migrates in memory every read, so this is purely cosmetic persistence.
+	if err := migrateConfigFileOnce(path, logger); err != nil {
+		logger.Error("failed to migrate configuration", "path", path, "error", err)
+		os.Exit(1)
 	}
 
 	// An invalid (unparseable) config is still fatal: there is no prior good
@@ -140,13 +148,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// MODBUS_URL overrides the configured address so an operator can point the
-	// container at their device without editing the mounted config file.
+	// MODBUS_URL overrides the modbus source's address so an operator can point
+	// the container at their device without editing config. Kept for backward
+	// compatibility; the source URL is now normally edited in the Settings UI.
 	if url := os.Getenv("MODBUS_URL"); url != "" {
-		if url != cfg.ModbusURL {
-			logger.Info("modbus_url overridden by MODBUS_URL", "url", url)
+		applied := false
+		for i := range cfg.Sources {
+			if cfg.Sources[i].Type == SourceTypeModbus {
+				if cfg.Sources[i].URL != url {
+					logger.Info("modbus source URL overridden by MODBUS_URL", "source", cfg.Sources[i].Name, "url", url)
+				}
+				cfg.Sources[i].URL = url
+				applied = true
+				break
+			}
 		}
-		cfg.ModbusURL = url
+		if !applied {
+			logger.Warn("MODBUS_URL set but no modbus source is configured; ignoring", "url", url)
+		}
 	}
 
 	logger.Info("configuration loaded", "path", path, "devices", len(cfg.Devices))
@@ -181,21 +200,31 @@ func main() {
 	// the process lifetime.
 	aggregate, banks, charger, meters := buildDevices(cfg)
 
+	// Resolve the (single, for now) Modbus source. A MadBus-only install has
+	// none, in which case there is simply no Modbus client and only MadBus is
+	// polled. The URL is fixed for the process lifetime (edits apply on restart).
+	modbusURL := ""
+	if src, ok := modbusSource(cfg); ok {
+		modbusURL = src.URL
+	}
+
 	// The Modbus client is created once. A malformed URL is non-fatal: log it
 	// and serve the dashboard anyway so the operator can correct the config,
 	// rather than crash-looping.
 	var client *modbus.ModbusClient
-	if c, err := modbus.NewClient(&modbus.ClientConfiguration{
-		URL:     cfg.ModbusURL,
-		Timeout: modbusTimeout,
-	}); err != nil {
-		logger.Error(
-			"invalid modbus_url; polling disabled until restart with a valid URL",
-			"url", cfg.ModbusURL,
-			"error", err,
-		)
-	} else {
-		client = c
+	if modbusURL != "" {
+		if c, err := modbus.NewClient(&modbus.ClientConfiguration{
+			URL:     modbusURL,
+			Timeout: modbusTimeout,
+		}); err != nil {
+			logger.Error(
+				"invalid modbus source URL; polling disabled until restart with a valid URL",
+				"url", modbusURL,
+				"error", err,
+			)
+		} else {
+			client = c
+		}
 	}
 
 	// Connect lazily and keep retrying: an unreachable device at startup, a
@@ -206,12 +235,12 @@ func main() {
 		if err := client.Open(); err != nil {
 			logger.Warn(
 				"Victron Modbus server unreachable; dashboard is up, will keep retrying",
-				"url", cfg.ModbusURL,
+				"url", modbusURL,
 				"error", err,
 			)
 		} else {
 			connected = true
-			logger.Info("connected to Victron Modbus server", "url", cfg.ModbusURL)
+			logger.Info("connected to Victron Modbus server", "url", modbusURL)
 		}
 	}
 
@@ -293,13 +322,13 @@ func main() {
 				if !connected {
 					if err := client.Open(); err == nil {
 						connected = true
-						logger.Info("reconnected to Victron Modbus server", "url", cfg.ModbusURL)
+						logger.Info("reconnected to Victron Modbus server", "url", modbusURL)
 					}
 				}
 
 				if connected {
 					if !pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug, recordHistory) {
-						logger.Warn("Modbus link lost; will reconnect", "url", cfg.ModbusURL)
+						logger.Warn("Modbus link lost; will reconnect", "url", modbusURL)
 						_ = client.Close()
 						connected = false
 					}
@@ -463,6 +492,18 @@ func unitOrDisabled(unit *int) int {
 	return *unit
 }
 
+// modbusSource returns the single configured Modbus source, if any. This
+// version supports at most one (enforced by validate); Phase 2 will handle
+// several with per-source clients.
+func modbusSource(cfg Config) (Source, bool) {
+	for _, s := range cfg.Sources {
+		if s.Type == SourceTypeModbus {
+			return s, true
+		}
+	}
+	return Source{}, false
+}
+
 // statusTable maps a device type to its current-status table. Shunt/system
 // share the battery table; charge controllers and energy meters have their own.
 func statusTable(deviceType string) string {
@@ -559,9 +600,11 @@ type madbusRequest struct {
 func pollMadbus(logger *slog.Logger, db *sql.DB, cfg Config, meters []EnergyMeter, recordHistory bool) {
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 
-	urls := make(map[string]string, len(cfg.Madbus))
-	for _, inst := range cfg.Madbus {
-		urls[inst.Name] = inst.URL
+	urls := make(map[string]string)
+	for _, s := range cfg.Sources {
+		if s.Type == SourceTypeMadbus {
+			urls[s.Name] = s.URL
+		}
 	}
 
 	byInstance := make(map[string][]EnergyMeter)
@@ -629,12 +672,42 @@ func readMadbus(baseURL string, meters []EnergyMeter) (map[string]madbusDevice, 
 		sels = append(sels, madbusSelector{ID: m.MadbusID})
 	}
 
+	devs, err := madbusMeasurements(baseURL, sels)
+	if err != nil {
+		return nil, err
+	}
+
+	devices := make(map[string]madbusDevice, len(devs))
+	for _, d := range devs {
+		devices[d.Device.ID] = d
+	}
+
+	return devices, nil
+}
+
+// madbusBaseURL normalizes a MadBus source URL so it always carries a scheme.
+// Users commonly enter "host:port" (e.g. 192.168.1.3:8090) without "http://";
+// url.Parse then reads the host as a path segment and rejects the colon. MadBus
+// is plain HTTP, so a missing scheme defaults to http://.
+func madbusBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw != "" && !strings.Contains(raw, "://") {
+		return "http://" + raw
+	}
+	return raw
+}
+
+// madbusMeasurements performs one MadBus measurements round-trip for the given
+// selectors and returns the response devices. An empty selector list asks MadBus
+// for every device it serves, which is how the device form discovers the ids a
+// source offers (see handleListSourceDevices).
+func madbusMeasurements(baseURL string, sels []madbusSelector) ([]madbusDevice, error) {
 	body, err := json.Marshal(madbusRequest{Devices: sels})
 	if err != nil {
 		return nil, fmt.Errorf("encode madbus request: %w", err)
 	}
 
-	endpoint := strings.TrimRight(baseURL, "/") + "/api/v1/measurements"
+	endpoint := strings.TrimRight(madbusBaseURL(baseURL), "/") + "/api/v1/measurements"
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build madbus request: %w", err)
@@ -656,12 +729,7 @@ func readMadbus(baseURL string, meters []EnergyMeter) (map[string]madbusDevice, 
 		return nil, fmt.Errorf("decode madbus response: %w", err)
 	}
 
-	devices := make(map[string]madbusDevice, len(out.Devices))
-	for _, d := range out.Devices {
-		devices[d.Device.ID] = d
-	}
-
-	return devices, nil
+	return out.Devices, nil
 }
 
 // buildMeterStatus maps a MadBus device's measurements into an EnergyMeterStatus,

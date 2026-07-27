@@ -40,6 +40,18 @@
                 <div id="settings-status" class="field__hint" aria-live="polite"></div>
             </form>
 
+            <details class="collapse" id="sources-section">
+                <summary class="collapse__summary">Data Sources</summary>
+                <div class="collapse__body">
+                    <div class="devices-head">
+                        <a href="/source" class="btn btn--primary">Add Source</a>
+                    </div>
+                    <div id="sources" class="device-list">
+                        <p class="empty">Loading…</p>
+                    </div>
+                </div>
+            </details>
+
             <details class="collapse" id="devices-section">
                 <summary class="collapse__summary">Registered Devices</summary>
                 <div class="collapse__body">

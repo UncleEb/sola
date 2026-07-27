@@ -42,6 +42,12 @@
                     <input id="name" class="field__input" type="text" maxlength="60" required>
                 </label>
 
+                <label class="field">
+                    <span class="field__label">Data Source</span>
+                    <select id="source" class="field__input"></select>
+                    <span class="field__hint" id="source-hint">The source Sola reads this device from. Manage sources under Settings → Data Sources.</span>
+                </label>
+
                 <label class="field field--modbus">
                     <span class="field__label">Modbus Unit ID</span>
                     <input id="modbus_unit" class="field__input" type="number" min="0" max="255"
@@ -49,18 +55,10 @@
                     <span class="field__hint">Blank = no Modbus port (e.g. a disconnected bank).</span>
                 </label>
 
-                <label class="field field--meter">
-                    <span class="field__label">MadBus Source</span>
-                    <input id="source" class="field__input" type="text" maxlength="60"
-                           placeholder="e.g. garage">
-                    <span class="field__hint">Name of a MadBus instance from the <code>madbus</code> list in config.json.</span>
-                </label>
-
-                <label class="field field--meter">
-                    <span class="field__label">MadBus Device ID</span>
-                    <input id="madbus_id" class="field__input" type="text" maxlength="120"
-                           placeholder="e.g. meter-1">
-                    <span class="field__hint">The device id within that MadBus instance.</span>
+                <label class="field field--madbus">
+                    <span class="field__label">MadBus Device</span>
+                    <select id="madbus_id" class="field__input"></select>
+                    <span class="field__hint" id="madbus-hint">Choose a device reported by the selected MadBus source.</span>
                 </label>
 
                 <label class="field-check field--shunt">

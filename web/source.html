@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Data Source — Sola</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <canvas id="background"></canvas>
+
+    <header class="topbar">
+        <div class="topbar__left">
+            <a class="brand" href="/" aria-label="Sola home"><img class="brand__logo" src="/assets/logo.svg" alt="Sola"></a>
+            <nav class="nav">
+                <a href="/" class="nav__link">Dashboard</a>
+                <a href="/settings" class="nav__link nav__link--active">Settings</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="panel">
+            <h2 class="panel__title" id="form-title">Add Source</h2>
+
+            <form id="source-form" class="form">
+                <label class="field">
+                    <span class="field__label">Type</span>
+                    <select id="type" class="field__input">
+                        <option value="modbus">Victron (Modbus)</option>
+                        <option value="madbus">MadBus</option>
+                    </select>
+                    <span class="field__hint" id="type-hint"></span>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">Name</span>
+                    <input id="name" class="field__input" type="text" maxlength="60" required
+                           placeholder="e.g. victron">
+                    <span class="field__hint">Devices reference this source by name. Fixed once created.</span>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">URL</span>
+                    <input id="url" class="field__input" type="text" maxlength="200" required
+                           placeholder="tcp://192.168.1.100:502">
+                    <span class="field__hint" id="url-hint"></span>
+                </label>
+
+                <div id="form-error" class="form__error" hidden></div>
+
+                <div class="form__actions">
+                    <a href="/settings" class="btn">Cancel</a>
+                    <button type="submit" class="btn btn--primary" id="submit-btn">Add Source</button>
+                </div>
+            </form>
+        </section>
+    </main>
+
+    <script src="background.js"></script>
+    <script src="source.js"></script>
+</body>
+</html>

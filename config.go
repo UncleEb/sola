@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -29,26 +30,45 @@ const (
 // scale factors) remain code constants, since they are fixed by the device
 // type rather than by an installation.
 type Config struct {
-	ModbusURL           string           `json:"modbus_url"`
-	PollIntervalSeconds int              `json:"poll_interval_seconds"`
-	DatabasePath        string           `json:"database_path"`
-	HTTPAddr            string           `json:"http_addr"`                // dashboard listen address; defaults to defaultHTTPAddr
-	Debug               bool             `json:"debug"`                    // when true, print each poll's readings to stdout
-	SOCLowPercent       int              `json:"soc_low_percent"`          // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
-	Background          string           `json:"background"`               // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
-	HistoryIntervalSec  int              `json:"history_interval_seconds"` // snapshot cadence for the history tables; defaults to defaultHistoryIntervalSec
-	NextDeviceID        int              `json:"next_device_id"`           // monotonic ID allocator; only ever increases so IDs are never reused
-	Madbus              []MadbusInstance `json:"madbus,omitempty"`         // MadBus HTTP sources; a device references one by name via its Source
-	Devices             []DeviceConfig   `json:"devices"`
+	PollIntervalSeconds int            `json:"poll_interval_seconds"`
+	DatabasePath        string         `json:"database_path"`
+	HTTPAddr            string         `json:"http_addr"`                // dashboard listen address; defaults to defaultHTTPAddr
+	Debug               bool           `json:"debug"`                    // when true, print each poll's readings to stdout
+	SOCLowPercent       int            `json:"soc_low_percent"`          // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
+	Background          string         `json:"background"`               // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
+	HistoryIntervalSec  int            `json:"history_interval_seconds"` // snapshot cadence for the history tables; defaults to defaultHistoryIntervalSec
+	NextDeviceID        int            `json:"next_device_id"`           // monotonic ID allocator; only ever increases so IDs are never reused
+	Sources             []Source       `json:"sources"`                  // data sources (Victron Modbus + MadBus); a device references one by name via its Source
+	Devices             []DeviceConfig `json:"devices"`
+
+	// Legacy fields, kept only so pre-sources configs still parse and can be
+	// migrated (see migrate). They are cleared during migration, so a canonical
+	// (migrated) config never re-emits them.
+	ModbusURL string           `json:"modbus_url,omitempty"` // DEPRECATED: migrated into a "victron" modbus source
+	Madbus    []MadbusInstance `json:"madbus,omitempty"`     // DEPRECATED: migrated into type:"madbus" sources
 }
 
-// MadbusInstance is one MadBus normalization service Sola polls over HTTP. It is
-// a distinct data source from the Victron Modbus link: Sola polls each instance
-// once per cycle for all of the devices whose Source names it. Adding instances
-// lets Sola aggregate several MadBus hosts alongside the direct Victron feed.
-type MadbusInstance struct {
+// Source is one data source Sola polls: either the Victron Modbus link
+// (type "modbus") or a MadBus HTTP normalization service (type "madbus"). A
+// device references a source by Name. Sources are managed from the Settings UI,
+// so connection endpoints live in config, not in the deployment (env/compose).
+type Source struct {
 	Name string `json:"name"` // unique key referenced by a device's Source
-	URL  string `json:"url"`  // base URL, e.g. http://192.168.1.20:8090
+	Type string `json:"type"` // SourceTypeModbus | SourceTypeMadbus
+	URL  string `json:"url"`  // tcp://host:502 (modbus) or http://host:8090 (madbus)
+}
+
+// Source types.
+const (
+	SourceTypeModbus = "modbus"
+	SourceTypeMadbus = "madbus"
+)
+
+// MadbusInstance is the legacy shape of a MadBus source (pre-sources schema),
+// retained only for migration. New configs use Source with Type "madbus".
+type MadbusInstance struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 // Background options for the dashboard.
@@ -83,13 +103,9 @@ type DeviceConfig struct {
 	ModbusUnit  *int     `json:"modbus_unit"`            // nil = no exposed port (Victron devices); always nil for MadBus-sourced devices
 	Aggregate   bool     `json:"aggregate,omitempty"`    // shunt that owns pool SOC
 	MaxAmperage *float64 `json:"max_amperage,omitempty"` // charge_controller only: rated output amps, used to scale the dashboard flow animation
-	Source      string   `json:"source,omitempty"`       // "" = Victron/Modbus; otherwise the name of a MadBus instance
-	MadbusID    string   `json:"madbus_id,omitempty"`    // device id within the MadBus instance named by Source
+	Source      string   `json:"source,omitempty"`       // name of the Source this device is read from
+	MadbusID    string   `json:"madbus_id,omitempty"`    // device id within the MadBus source named by Source
 }
-
-// isMadbus reports whether the device's readings come from a MadBus instance
-// (rather than the direct Victron Modbus link).
-func (d DeviceConfig) isMadbus() bool { return d.Source != "" }
 
 // configPath returns the path to config.json. The directory is overridable via
 // SOLA_CONFIG_DIR so a Docker deployment can mount it as a volume; it
@@ -114,6 +130,11 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
+
+	// Upgrade a legacy (pre-sources) config in memory so every caller sees the
+	// canonical schema. This is idempotent and does not write to disk; the
+	// one-time on-disk rewrite happens at startup via migrateConfigFileOnce.
+	cfg.migrate()
 
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid config %s: %w", path, err)
@@ -143,15 +164,108 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+// migrate upgrades a legacy (pre-sources) config to the canonical sources schema
+// in memory. It is idempotent: it only acts when Sources is empty, and a
+// migrated or fresh config always has at least one source. It builds sources
+// from the deprecated ModbusURL/Madbus fields, repoints Victron devices at the
+// new "victron" source, and clears the legacy fields so they never round-trip.
+func (c *Config) migrate() {
+	if len(c.Sources) > 0 {
+		return
+	}
+
+	victronName := ""
+	if c.ModbusURL != "" {
+		victronName = c.uniqueSourceName("victron")
+		c.Sources = append(c.Sources, Source{Name: victronName, Type: SourceTypeModbus, URL: c.ModbusURL})
+	}
+
+	for _, m := range c.Madbus {
+		c.Sources = append(c.Sources, Source{Name: m.Name, Type: SourceTypeMadbus, URL: m.URL})
+	}
+
+	// Legacy devices with no Source were Victron/Modbus devices; point them at
+	// the migrated victron source. Energy meters already carry a madbus name.
+	if victronName != "" {
+		for i := range c.Devices {
+			if c.Devices[i].Source == "" {
+				c.Devices[i].Source = victronName
+			}
+		}
+	}
+
+	c.ModbusURL = ""
+	c.Madbus = nil
+}
+
+// uniqueSourceName returns base, or base with a disambiguating suffix if a
+// source (or a legacy madbus instance) already uses that name.
+func (c *Config) uniqueSourceName(base string) string {
+	taken := func(name string) bool {
+		for _, s := range c.Sources {
+			if s.Name == name {
+				return true
+			}
+		}
+		for _, m := range c.Madbus {
+			if m.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !taken(base) {
+		return base
+	}
+	if alt := base + "-modbus"; !taken(alt) {
+		return alt
+	}
+	for i := 2; ; i++ {
+		if alt := fmt.Sprintf("%s-%d", base, i); !taken(alt) {
+			return alt
+		}
+	}
+}
+
+// migrateConfigFileOnce upgrades a legacy config file to the sources schema on
+// disk, exactly once. LoadConfig already migrates in memory on every read; this
+// only persists the upgrade so the file a human reads matches reality. It is a
+// no-op for an already-migrated or fresh config.
+func migrateConfigFileOnce(path string, logger *slog.Logger) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+
+	// Already migrated, or nothing legacy to migrate.
+	if len(cfg.Sources) > 0 || (cfg.ModbusURL == "" && len(cfg.Madbus) == 0) {
+		return nil
+	}
+
+	cfg.migrate()
+	if err := SaveConfig(path, cfg); err != nil {
+		return fmt.Errorf("persist migrated config: %w", err)
+	}
+
+	logger.Info("migrated configuration to the sources schema", "path", path, "sources", len(cfg.Sources))
+	return nil
+}
+
 // defaultConfig returns a minimal, valid configuration used to bootstrap a
 // fresh install (e.g. an empty mounted Docker volume). It is deliberately
-// generic: a placeholder Modbus URL — overridden by the MODBUS_URL env var or
-// by editing config.json — and a single System aggregate device on the Venus
-// default unit 100, so the dashboard comes up and can be tailored from there.
+// generic: a single "victron" Modbus source with a placeholder URL — edited
+// from Settings → Data Sources (or overridden by the MODBUS_URL env var) — and a
+// single System aggregate device on the Venus default unit 100, so the dashboard
+// comes up and can be tailored from there.
 func defaultConfig() Config {
 	unit := 100
 	return Config{
-		ModbusURL:           "tcp://192.168.1.100:502",
 		PollIntervalSeconds: 5,
 		DatabasePath:        "sola.db",
 		HTTPAddr:            defaultHTTPAddr,
@@ -159,8 +273,11 @@ func defaultConfig() Config {
 		Background:          defaultBackground,
 		HistoryIntervalSec:  defaultHistoryIntervalSec,
 		NextDeviceID:        2,
+		Sources: []Source{
+			{Name: "victron", Type: SourceTypeModbus, URL: "tcp://192.168.1.100:502"},
+		},
 		Devices: []DeviceConfig{
-			{ID: 1, Name: "Battery Pool", DeviceType: DeviceTypeSystem, ModbusUnit: &unit},
+			{ID: 1, Name: "Battery Pool", DeviceType: DeviceTypeSystem, ModbusUnit: &unit, Source: "victron"},
 		},
 	}
 }
@@ -247,10 +364,6 @@ func nextDeviceID(cfg Config) int {
 // validate rejects configurations that could not run correctly, so problems
 // surface as a clear message rather than as confusing runtime behavior.
 func (c Config) validate() error {
-	if c.ModbusURL == "" {
-		return errors.New("modbus_url is required")
-	}
-
 	if c.PollIntervalSeconds <= 0 {
 		return fmt.Errorf("poll_interval_seconds must be positive, got %d", c.PollIntervalSeconds)
 	}
@@ -270,20 +383,33 @@ func (c Config) validate() error {
 			BackgroundNone, BackgroundStarfield, BackgroundWarpspeed, c.Background)
 	}
 
-	// MadBus instances: unique non-empty names, non-empty URLs. Devices reference
-	// an instance by name via Source.
-	madbusNames := make(map[string]bool)
-	for _, m := range c.Madbus {
-		if m.Name == "" {
-			return errors.New("madbus: name is required")
+	// Data sources: unique non-empty names, a valid type, and a non-empty URL.
+	// This version supports a single Modbus source (multiple is a later change);
+	// MadBus sources may be many.
+	sources := make(map[string]Source)
+	modbusSources := 0
+	for _, s := range c.Sources {
+		if s.Name == "" {
+			return errors.New("source: name is required")
 		}
-		if madbusNames[m.Name] {
-			return fmt.Errorf("duplicate madbus instance name %q", m.Name)
+		if _, dup := sources[s.Name]; dup {
+			return fmt.Errorf("duplicate source name %q", s.Name)
 		}
-		madbusNames[m.Name] = true
-		if m.URL == "" {
-			return fmt.Errorf("madbus %q: url is required", m.Name)
+		switch s.Type {
+		case SourceTypeModbus:
+			modbusSources++
+		case SourceTypeMadbus:
+			// many allowed
+		default:
+			return fmt.Errorf("source %q: type must be %q or %q, got %q", s.Name, SourceTypeModbus, SourceTypeMadbus, s.Type)
 		}
+		if s.URL == "" {
+			return fmt.Errorf("source %q: url is required", s.Name)
+		}
+		sources[s.Name] = s
+	}
+	if modbusSources > 1 {
+		return fmt.Errorf("at most one modbus source is supported in this version, found %d", modbusSources)
 	}
 
 	if len(c.Devices) == 0 {
@@ -303,19 +429,23 @@ func (c Config) validate() error {
 		}
 		seen[d.ID] = true
 
-		// Source resolution: empty = Victron/Modbus; otherwise it must name a
-		// declared MadBus instance. madbus_id only makes sense with a source.
-		if d.Source != "" && !madbusNames[d.Source] {
-			return fmt.Errorf("device %d: source %q does not match any madbus instance", d.ID, d.Source)
+		// Every device is read from a declared source, and its type must match
+		// the source type: Modbus devices (shunt/charge_controller/system) from a
+		// modbus source, energy meters from a madbus source.
+		if d.Source == "" {
+			return fmt.Errorf("device %d: source is required", d.ID)
 		}
-		if d.Source == "" && d.MadbusID != "" {
-			return fmt.Errorf("device %d: madbus_id set but no source", d.ID)
+		src, ok := sources[d.Source]
+		if !ok {
+			return fmt.Errorf("device %d: source %q is not declared", d.ID, d.Source)
 		}
-		// Guardrail: only energy_meter is wired for a MadBus source so far. Other
-		// types remain Victron-only until each is implemented, so nothing
-		// half-built is configurable.
-		if d.Source != "" && d.DeviceType != DeviceTypeEnergyMeter {
-			return fmt.Errorf("device %d: a MadBus source is only supported for %q so far", d.ID, DeviceTypeEnergyMeter)
+		wantType := SourceTypeModbus
+		if d.DeviceType == DeviceTypeEnergyMeter {
+			wantType = SourceTypeMadbus
+		}
+		if src.Type != wantType {
+			return fmt.Errorf("device %d (%s): requires a %q source, but %q is a %q source",
+				d.ID, d.DeviceType, wantType, d.Source, src.Type)
 		}
 
 		switch d.DeviceType {
@@ -344,9 +474,6 @@ func (c Config) validate() error {
 				return fmt.Errorf("device %d: max_amperage is only valid for %q", d.ID, DeviceTypeChargeController)
 			}
 		case DeviceTypeEnergyMeter:
-			if d.Source == "" {
-				return fmt.Errorf("device %d: %q requires a madbus source", d.ID, DeviceTypeEnergyMeter)
-			}
 			if d.MadbusID == "" {
 				return fmt.Errorf("device %d: %q requires madbus_id", d.ID, DeviceTypeEnergyMeter)
 			}
