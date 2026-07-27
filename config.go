@@ -17,6 +17,11 @@ const (
 	// It is an alternative aggregate source for installs without a whole-bank
 	// shunt.
 	DeviceTypeSystem = "system"
+	// DeviceTypeEnergyMeter is an AC energy meter whose readings come from a
+	// MadBus instance over HTTP (RS-485 normalized to JSON), not from the Victron
+	// Modbus link. Such a device carries a Source (the MadBus instance name) and
+	// a MadbusID instead of a ModbusUnit.
+	DeviceTypeEnergyMeter = "energy_meter"
 )
 
 // Config is the on-disk configuration, holding the deployment-specific values
@@ -24,16 +29,26 @@ const (
 // scale factors) remain code constants, since they are fixed by the device
 // type rather than by an installation.
 type Config struct {
-	ModbusURL           string         `json:"modbus_url"`
-	PollIntervalSeconds int            `json:"poll_interval_seconds"`
-	DatabasePath        string         `json:"database_path"`
-	HTTPAddr            string         `json:"http_addr"`                // dashboard listen address; defaults to defaultHTTPAddr
-	Debug               bool           `json:"debug"`                    // when true, print each poll's readings to stdout
-	SOCLowPercent       int            `json:"soc_low_percent"`          // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
-	Background          string         `json:"background"`               // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
-	HistoryIntervalSec  int            `json:"history_interval_seconds"` // snapshot cadence for the history tables; defaults to defaultHistoryIntervalSec
-	NextDeviceID        int            `json:"next_device_id"`           // monotonic ID allocator; only ever increases so IDs are never reused
-	Devices             []DeviceConfig `json:"devices"`
+	ModbusURL           string           `json:"modbus_url"`
+	PollIntervalSeconds int              `json:"poll_interval_seconds"`
+	DatabasePath        string           `json:"database_path"`
+	HTTPAddr            string           `json:"http_addr"`                // dashboard listen address; defaults to defaultHTTPAddr
+	Debug               bool             `json:"debug"`                    // when true, print each poll's readings to stdout
+	SOCLowPercent       int              `json:"soc_low_percent"`          // SOC at/below which the dashboard ring is fully "low" coloured; defaults to defaultSOCLowPercent
+	Background          string           `json:"background"`               // dashboard background: none | starfield | warpspeed; defaults to defaultBackground
+	HistoryIntervalSec  int              `json:"history_interval_seconds"` // snapshot cadence for the history tables; defaults to defaultHistoryIntervalSec
+	NextDeviceID        int              `json:"next_device_id"`           // monotonic ID allocator; only ever increases so IDs are never reused
+	Madbus              []MadbusInstance `json:"madbus,omitempty"`         // MadBus HTTP sources; a device references one by name via its Source
+	Devices             []DeviceConfig   `json:"devices"`
+}
+
+// MadbusInstance is one MadBus normalization service Sola polls over HTTP. It is
+// a distinct data source from the Victron Modbus link: Sola polls each instance
+// once per cycle for all of the devices whose Source names it. Adding instances
+// lets Sola aggregate several MadBus hosts alongside the direct Victron feed.
+type MadbusInstance struct {
+	Name string `json:"name"` // unique key referenced by a device's Source
+	URL  string `json:"url"`  // base URL, e.g. http://192.168.1.20:8090
 }
 
 // Background options for the dashboard.
@@ -64,11 +79,17 @@ const defaultSOCLowPercent = 50
 type DeviceConfig struct {
 	ID          int      `json:"id"`
 	Name        string   `json:"name"`
-	DeviceType  string   `json:"device_type"`            // DeviceTypeShunt | DeviceTypeChargeController
-	ModbusUnit  *int     `json:"modbus_unit"`            // nil = no exposed port
+	DeviceType  string   `json:"device_type"`            // DeviceTypeShunt | DeviceTypeChargeController | DeviceTypeSystem | DeviceTypeEnergyMeter
+	ModbusUnit  *int     `json:"modbus_unit"`            // nil = no exposed port (Victron devices); always nil for MadBus-sourced devices
 	Aggregate   bool     `json:"aggregate,omitempty"`    // shunt that owns pool SOC
 	MaxAmperage *float64 `json:"max_amperage,omitempty"` // charge_controller only: rated output amps, used to scale the dashboard flow animation
+	Source      string   `json:"source,omitempty"`       // "" = Victron/Modbus; otherwise the name of a MadBus instance
+	MadbusID    string   `json:"madbus_id,omitempty"`    // device id within the MadBus instance named by Source
 }
+
+// isMadbus reports whether the device's readings come from a MadBus instance
+// (rather than the direct Victron Modbus link).
+func (d DeviceConfig) isMadbus() bool { return d.Source != "" }
 
 // configPath returns the path to config.json. The directory is overridable via
 // SOLA_CONFIG_DIR so a Docker deployment can mount it as a volume; it
@@ -249,6 +270,22 @@ func (c Config) validate() error {
 			BackgroundNone, BackgroundStarfield, BackgroundWarpspeed, c.Background)
 	}
 
+	// MadBus instances: unique non-empty names, non-empty URLs. Devices reference
+	// an instance by name via Source.
+	madbusNames := make(map[string]bool)
+	for _, m := range c.Madbus {
+		if m.Name == "" {
+			return errors.New("madbus: name is required")
+		}
+		if madbusNames[m.Name] {
+			return fmt.Errorf("duplicate madbus instance name %q", m.Name)
+		}
+		madbusNames[m.Name] = true
+		if m.URL == "" {
+			return fmt.Errorf("madbus %q: url is required", m.Name)
+		}
+	}
+
 	if len(c.Devices) == 0 {
 		return errors.New("at least one device is required")
 	}
@@ -265,6 +302,21 @@ func (c Config) validate() error {
 			return fmt.Errorf("duplicate device id %d", d.ID)
 		}
 		seen[d.ID] = true
+
+		// Source resolution: empty = Victron/Modbus; otherwise it must name a
+		// declared MadBus instance. madbus_id only makes sense with a source.
+		if d.Source != "" && !madbusNames[d.Source] {
+			return fmt.Errorf("device %d: source %q does not match any madbus instance", d.ID, d.Source)
+		}
+		if d.Source == "" && d.MadbusID != "" {
+			return fmt.Errorf("device %d: madbus_id set but no source", d.ID)
+		}
+		// Guardrail: only energy_meter is wired for a MadBus source so far. Other
+		// types remain Victron-only until each is implemented, so nothing
+		// half-built is configurable.
+		if d.Source != "" && d.DeviceType != DeviceTypeEnergyMeter {
+			return fmt.Errorf("device %d: a MadBus source is only supported for %q so far", d.ID, DeviceTypeEnergyMeter)
+		}
 
 		switch d.DeviceType {
 		case DeviceTypeShunt:
@@ -287,6 +339,22 @@ func (c Config) validate() error {
 			aggregates++
 			if d.Aggregate {
 				return fmt.Errorf("device %d: the aggregate flag is implicit for %q; do not set it", d.ID, DeviceTypeSystem)
+			}
+			if d.MaxAmperage != nil {
+				return fmt.Errorf("device %d: max_amperage is only valid for %q", d.ID, DeviceTypeChargeController)
+			}
+		case DeviceTypeEnergyMeter:
+			if d.Source == "" {
+				return fmt.Errorf("device %d: %q requires a madbus source", d.ID, DeviceTypeEnergyMeter)
+			}
+			if d.MadbusID == "" {
+				return fmt.Errorf("device %d: %q requires madbus_id", d.ID, DeviceTypeEnergyMeter)
+			}
+			if d.ModbusUnit != nil {
+				return fmt.Errorf("device %d: %q is sourced from MadBus, not Modbus; remove modbus_unit", d.ID, DeviceTypeEnergyMeter)
+			}
+			if d.Aggregate {
+				return fmt.Errorf("device %d: aggregate is only valid for %q", d.ID, DeviceTypeShunt)
 			}
 			if d.MaxAmperage != nil {
 				return fmt.Errorf("device %d: max_amperage is only valid for %q", d.ID, DeviceTypeChargeController)

@@ -216,10 +216,37 @@ type chargerJSON struct {
 	UpdatedAt *string `json:"updated_at"`
 }
 
+// meterJSON is one AC energy meter (MadBus-sourced) as sent to the client.
+// Pointer fields carry SQL NULL through as JSON null, so an offline/stale meter
+// is visibly missing readings rather than reporting misleading zeros. Status is
+// "online", "stale" (values present but flagged not-fresh by MadBus), or
+// "offline".
+type meterJSON struct {
+	ID       int    `json:"id"`
+	Source   string `json:"source"`
+	MadbusID string `json:"madbus_id"`
+	Name     string `json:"name"`
+
+	Voltage       *float64 `json:"voltage"`
+	Current       *float64 `json:"current"`
+	Frequency     *float64 `json:"frequency"`
+	Power         *float64 `json:"power"`
+	ApparentPower *float64 `json:"apparent_power"`
+	ReactivePower *float64 `json:"reactive_power"`
+	PowerFactor   *float64 `json:"power_factor"`
+	EnergyImport  *float64 `json:"energy_import"`
+	EnergyExport  *float64 `json:"energy_export"`
+	EnergyTotal   *float64 `json:"energy_total"`
+
+	Status    string  `json:"status"`
+	UpdatedAt *string `json:"updated_at"`
+}
+
 // statusResponse is the whole dashboard payload for one refresh.
 type statusResponse struct {
 	Shunts        []shuntJSON  `json:"shunts"`
 	Charger       *chargerJSON `json:"charger"`
+	Meters        []meterJSON  `json:"meters"`
 	SOCLowPercent int          `json:"soc_low_percent"`
 }
 
@@ -242,9 +269,17 @@ func (s *dashboardServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	meters, err := s.queryEnergyMeters()
+	if err != nil {
+		s.logger.Error("dashboard: query energy meters", "error", err)
+		http.Error(w, "failed to read meter status", http.StatusInternalServerError)
+		return
+	}
+
 	writeJSON(w, statusResponse{
 		Shunts:        shunts,
 		Charger:       charger,
+		Meters:        meters,
 		SOCLowPercent: cfg.SOCLowPercent,
 	})
 }
@@ -391,6 +426,74 @@ LIMIT 1;`
 		Status:          status,
 		UpdatedAt:       nullString(updatedAt),
 	}, nil
+}
+
+// queryEnergyMeters returns all registered AC energy meters (MadBus-sourced).
+func (s *dashboardServer) queryEnergyMeters() ([]meterJSON, error) {
+	const query = `
+SELECT id, source, madbus_id, name, voltage, current, frequency, power,
+       apparent_power, reactive_power, power_factor,
+       energy_import, energy_export, energy_total, status, updated_at
+FROM energy_meter_status
+ORDER BY id;`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("query energy meters: %w", err)
+	}
+	defer rows.Close()
+
+	var meters []meterJSON
+
+	for rows.Next() {
+		var (
+			id            int
+			source        string
+			madbusID      string
+			name          string
+			voltage       sql.NullFloat64
+			current       sql.NullFloat64
+			frequency     sql.NullFloat64
+			power         sql.NullFloat64
+			apparentPower sql.NullFloat64
+			reactivePower sql.NullFloat64
+			powerFactor   sql.NullFloat64
+			energyImport  sql.NullFloat64
+			energyExport  sql.NullFloat64
+			energyTotal   sql.NullFloat64
+			status        string
+			updatedAt     sql.NullString
+		)
+
+		if err := rows.Scan(
+			&id, &source, &madbusID, &name, &voltage, &current, &frequency, &power,
+			&apparentPower, &reactivePower, &powerFactor,
+			&energyImport, &energyExport, &energyTotal, &status, &updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan energy meter: %w", err)
+		}
+
+		meters = append(meters, meterJSON{
+			ID:            id,
+			Source:        source,
+			MadbusID:      madbusID,
+			Name:          name,
+			Voltage:       nullFloat(voltage),
+			Current:       nullFloat(current),
+			Frequency:     nullFloat(frequency),
+			Power:         nullFloat(power),
+			ApparentPower: nullFloat(apparentPower),
+			ReactivePower: nullFloat(reactivePower),
+			PowerFactor:   nullFloat(powerFactor),
+			EnergyImport:  nullFloat(energyImport),
+			EnergyExport:  nullFloat(energyExport),
+			EnergyTotal:   nullFloat(energyTotal),
+			Status:        status,
+			UpdatedAt:     nullString(updatedAt),
+		})
+	}
+
+	return meters, rows.Err()
 }
 
 // decodedName runs a raw Victron code through its lookup table, returning nil
@@ -735,6 +838,16 @@ func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) 
 				seriesDef{Key: "yield_today", Label: "Yield", Unit: "kWh", column: "yield_today", agg: "max"},
 				seriesDef{Key: "max_power_today", Label: "Peak Power", Unit: "W", column: "max_power_today", agg: "max"},
 			)
+		}
+	} else if device.DeviceType == DeviceTypeEnergyMeter {
+		table = "energy_meter_history"
+		series = []seriesDef{
+			{Key: "power", Label: "Power", Unit: "W", column: "power", agg: "avg"},
+			{Key: "voltage", Label: "Voltage", Unit: "V", column: "voltage", agg: "avg"},
+			{Key: "current", Label: "Current", Unit: "A", column: "current", agg: "avg"},
+			{Key: "frequency", Label: "Frequency", Unit: "Hz", column: "frequency", agg: "avg"},
+			{Key: "power_factor", Label: "Power Factor", column: "power_factor", agg: "avg"},
+			{Key: "energy_total", Label: "Total Energy", Unit: "kWh", column: "energy_total", agg: "max"},
 		}
 	} else {
 		series = []seriesDef{

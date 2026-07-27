@@ -499,9 +499,11 @@ main {
 .status-dot--online::before { background: var(--good); box-shadow: 0 0 6px var(--good); }
 .status-dot--offline::before { background: var(--bad); }
 .status-dot--disconnected::before { background: var(--idle); }
+.status-dot--stale::before { background: var(--pv); box-shadow: 0 0 6px var(--pv); }
 
 .bank--offline { opacity: 0.65; }
 .bank--disconnected { opacity: 0.45; }
+.bank--stale { opacity: 0.85; }
 
 .bank__readings {
     display: grid;

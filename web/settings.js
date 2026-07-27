@@ -69,13 +69,16 @@ const TYPE_LABELS = {
     charge_controller: "Charge Controller",
     system: "System",
     shunt: "Battery Shunt",
+    energy_meter: "Energy Meter",
 };
 
 function deviceRow(d) {
     const type = TYPE_LABELS[d.device_type] || d.device_type;
-    const unit = d.modbus_unit === null || d.modbus_unit === undefined
-        ? "No Modbus port"
-        : `Unit ${d.modbus_unit}`;
+    const unit = d.device_type === "energy_meter"
+        ? `${d.source || "?"} · ${d.madbus_id || "?"}`
+        : d.modbus_unit === null || d.modbus_unit === undefined
+            ? "No Modbus port"
+            : `Unit ${d.modbus_unit}`;
 
     const tags = [];
     if (d.aggregate || d.device_type === "system") {

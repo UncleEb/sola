@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
@@ -85,6 +89,17 @@ type SolarCharger struct {
 	ChargeState uint16
 	MPPMode     uint16
 	ErrorCode   uint16
+}
+
+// EnergyMeter is an AC energy meter polled from a MadBus instance over HTTP
+// rather than from the Victron Modbus link. It carries only identity + routing
+// (which instance, which MadBus device id); the readings themselves come fresh
+// from MadBus each cycle.
+type EnergyMeter struct {
+	ID       int
+	Name     string
+	Source   string // MadBus instance name (config.MadbusInstance.Name)
+	MadbusID string // device id within that instance
 }
 
 func main() {
@@ -164,7 +179,7 @@ func main() {
 	// The device registry, poll interval, and debug flag are applied live (see
 	// the reload below); modbus_url, database_path, and http_addr are fixed for
 	// the process lifetime.
-	aggregate, banks, charger := buildDevices(cfg)
+	aggregate, banks, charger, meters := buildDevices(cfg)
 
 	// The Modbus client is created once. A malformed URL is non-fatal: log it
 	// and serve the dashboard anyway so the operator can correct the config,
@@ -209,6 +224,10 @@ func main() {
 			connected = false
 		}
 	}
+	// MadBus is an independent source: poll it at startup even if Modbus failed.
+	if len(meters) > 0 {
+		pollMadbus(logger, db, cfg, meters, true)
+	}
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
@@ -250,10 +269,20 @@ func main() {
 				// device structs — keeps all device state single-threaded; the
 				// web API only ever rewrites config.json.
 				if !reflect.DeepEqual(fresh.Devices, current.Devices) {
-					aggregate, banks, charger = reconcileDevices(logger, db, current, fresh)
+					aggregate, banks, charger, meters = reconcileDevices(logger, db, current, fresh)
 				}
 
 				current = fresh
+			}
+
+			// Record a history snapshot once per (hot-appliable) history interval.
+			// It's a floor: snapshots ride poll cycles, so they can't be closer
+			// together than the poll interval. Computed once per tick and shared by
+			// both data sources, so meter history is captured even when Modbus is
+			// down (and vice-versa).
+			recordHistory := time.Since(lastHistoryAt) >= time.Duration(current.HistoryIntervalSec)*time.Second
+			if recordHistory {
+				lastHistoryAt = time.Now()
 			}
 
 			// Keep the Modbus link healthy: (re)connect if needed, then poll. A
@@ -269,20 +298,19 @@ func main() {
 				}
 
 				if connected {
-					// Record a history snapshot once per (hot-appliable) history
-					// interval. It is a floor: snapshots ride poll cycles, so they
-					// can't be closer together than the poll interval.
-					recordHistory := time.Since(lastHistoryAt) >= time.Duration(current.HistoryIntervalSec)*time.Second
-					if recordHistory {
-						lastHistoryAt = time.Now()
-					}
-
 					if !pollAndStore(logger, db, client, aggregate, banks, charger, current.Debug, recordHistory) {
 						logger.Warn("Modbus link lost; will reconnect", "url", cfg.ModbusURL)
 						_ = client.Close()
 						connected = false
 					}
 				}
+			}
+
+			// MadBus is a separate data source: poll it every tick regardless of
+			// the Modbus link state. Its failures mark only its own meters offline
+			// and never disturb the Modbus connection.
+			if len(meters) > 0 {
+				pollMadbus(logger, db, current, meters, recordHistory)
 			}
 
 		case <-ctx.Done():
@@ -347,9 +375,17 @@ func runHealthcheck() int {
 // the poll loop uses: the single aggregate shunt (nil if none), the individual
 // banks, and the charge controller (nil if none). validate() has already
 // guaranteed device types are valid and at most one aggregate exists.
-func buildDevices(cfg Config) (aggregate *BatteryBank, banks []BatteryBank, charger *SolarCharger) {
+func buildDevices(cfg Config) (aggregate *BatteryBank, banks []BatteryBank, charger *SolarCharger, meters []EnergyMeter) {
 	for _, d := range cfg.Devices {
 		switch d.DeviceType {
+		case DeviceTypeEnergyMeter:
+			meters = append(meters, EnergyMeter{
+				ID:       d.ID,
+				Name:     d.Name,
+				Source:   d.Source,
+				MadbusID: d.MadbusID,
+			})
+
 		case DeviceTypeShunt:
 			bank := BatteryBank{
 				ID:     d.ID,
@@ -382,7 +418,7 @@ func buildDevices(cfg Config) (aggregate *BatteryBank, banks []BatteryBank, char
 		}
 	}
 
-	return aggregate, banks, charger
+	return aggregate, banks, charger, meters
 }
 
 // reconcileDevices applies a changed device list live: it deletes the status
@@ -390,7 +426,7 @@ func buildDevices(cfg Config) (aggregate *BatteryBank, banks []BatteryBank, char
 // set, and returns the rebuilt in-memory registry. It runs in the poll loop so
 // no other goroutine touches device state. Row/seed failures are logged but not
 // fatal — the collector keeps running with whatever succeeded.
-func reconcileDevices(logger *slog.Logger, db *sql.DB, old, fresh Config) (*BatteryBank, []BatteryBank, *SolarCharger) {
+func reconcileDevices(logger *slog.Logger, db *sql.DB, old, fresh Config) (*BatteryBank, []BatteryBank, *SolarCharger, []EnergyMeter) {
 	freshIDs := make(map[int]bool, len(fresh.Devices))
 	for _, d := range fresh.Devices {
 		freshIDs[d.ID] = true
@@ -401,12 +437,7 @@ func reconcileDevices(logger *slog.Logger, db *sql.DB, old, fresh Config) (*Batt
 			continue
 		}
 
-		table := tableBatteryShunt
-		if d.DeviceType == DeviceTypeChargeController {
-			table = tableChargeController
-		}
-
-		if err := deleteDevice(db, table, d.ID); err != nil {
+		if err := deleteDevice(db, statusTable(d.DeviceType), d.ID); err != nil {
 			logger.Error("failed to remove device row", "id", d.ID, "name", d.Name, "error", err)
 		} else {
 			logger.Info("device removed", "id", d.ID, "name", d.Name)
@@ -432,18 +463,35 @@ func unitOrDisabled(unit *int) int {
 	return *unit
 }
 
+// statusTable maps a device type to its current-status table. Shunt/system
+// share the battery table; charge controllers and energy meters have their own.
+func statusTable(deviceType string) string {
+	switch deviceType {
+	case DeviceTypeChargeController:
+		return tableChargeController
+	case DeviceTypeEnergyMeter:
+		return tableEnergyMeter
+	default:
+		return tableBatteryShunt
+	}
+}
+
 // seedDevices registers every configured device in its status table so that
 // even never-polled devices (such as disconnected banks) are visible as
 // offline from startup. Existing rows are left untouched.
 func seedDevices(db *sql.DB, cfg Config) error {
 	for _, d := range cfg.Devices {
-		table := tableBatteryShunt
-		if d.DeviceType == DeviceTypeChargeController {
-			table = tableChargeController
+		// MadBus-sourced devices have a string (source, madbus_id) identity
+		// instead of a Modbus unit, so they seed via a dedicated path.
+		if d.DeviceType == DeviceTypeEnergyMeter {
+			if err := seedEnergyMeter(db, d.ID, d.Source, d.MadbusID, d.Name); err != nil {
+				return err
+			}
+			continue
 		}
 
 		if err := seedDevice(
-			db, table, d.ID, modbusID(unitOrDisabled(d.ModbusUnit)), d.Name,
+			db, statusTable(d.DeviceType), d.ID, modbusID(unitOrDisabled(d.ModbusUnit)), d.Name,
 		); err != nil {
 			return err
 		}
@@ -460,6 +508,227 @@ func modbusID(unitID int) sql.NullInt64 {
 	}
 
 	return sql.NullInt64{Int64: int64(unitID), Valid: true}
+}
+
+// --- MadBus polling ----------------------------------------------------------
+
+// madbusTimeout bounds a single MadBus HTTP round-trip, independent of the
+// Modbus timeout: a slow or down MadBus instance must not stall the poll loop.
+const madbusTimeout = 4 * time.Second
+
+// madbusClient is the shared HTTP client for MadBus polls (connection reuse).
+var madbusClient = &http.Client{Timeout: madbusTimeout}
+
+// MadBus measurements API DTOs (mirror the MadBus service's internal/api).
+type madbusMeasurement struct {
+	Value *float64 `json:"value"`
+	Unit  string   `json:"unit"`
+	Stale bool     `json:"stale"`
+}
+
+type madbusDevice struct {
+	Device struct {
+		ID       string  `json:"id"`
+		Name     string  `json:"name"`
+		Profile  string  `json:"profile"`
+		Online   bool    `json:"online"`
+		LastRead *string `json:"last_read"`
+	} `json:"device"`
+	Measurements map[string]madbusMeasurement `json:"measurements"`
+}
+
+type madbusResponse struct {
+	ReadAt  string         `json:"read_at"`
+	Devices []madbusDevice `json:"devices"`
+}
+
+type madbusSelector struct {
+	ID string `json:"id"`
+}
+
+type madbusRequest struct {
+	Devices []madbusSelector `json:"devices"`
+}
+
+// pollMadbus reads every configured energy meter from its MadBus instance and
+// stores the results. Meters are grouped by instance so each instance is polled
+// exactly once per cycle (one round-trip for all of its devices). An instance
+// that can't be reached marks only its own meters offline — it never touches the
+// Victron Modbus link. Values are rounded on the way in (MadBus serves float32
+// promoted to float64, so raw values carry fuzz like 0.20800000429153442).
+func pollMadbus(logger *slog.Logger, db *sql.DB, cfg Config, meters []EnergyMeter, recordHistory bool) {
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+
+	urls := make(map[string]string, len(cfg.Madbus))
+	for _, inst := range cfg.Madbus {
+		urls[inst.Name] = inst.URL
+	}
+
+	byInstance := make(map[string][]EnergyMeter)
+	for _, m := range meters {
+		byInstance[m.Source] = append(byInstance[m.Source], m)
+	}
+
+	for source, group := range byInstance {
+		url, ok := urls[source]
+		if !ok {
+			// Instance vanished from config (mid-edit): keep last-good, show offline.
+			markMetersOffline(logger, db, group)
+			continue
+		}
+
+		results, err := readMadbus(url, group)
+		if err != nil {
+			logger.Warn("MadBus poll failed", "source", source, "url", url, "error", err)
+			markMetersOffline(logger, db, group)
+			continue
+		}
+
+		for _, m := range group {
+			dev, present := results[m.MadbusID]
+			if !present || !dev.Device.Online {
+				// Absent or reported offline: preserve the last-good reading and
+				// just flip status to offline.
+				if err := markDeviceOffline(db, tableEnergyMeter, m.ID); err != nil {
+					logger.Error("failed to mark meter offline", "id", m.ID, "error", err)
+				}
+				continue
+			}
+
+			status := buildMeterStatus(m, dev)
+			if cfg.Debug {
+				printMeter(status)
+			}
+			if err := upsertEnergyMeter(db, status, updatedAt); err != nil {
+				logger.Error("failed to store meter reading", "id", m.ID, "error", err)
+			}
+			if recordHistory {
+				if err := insertEnergyMeterHistory(db, status, updatedAt); err != nil {
+					logger.Error("failed to record meter history", "id", m.ID, "error", err)
+				}
+			}
+		}
+	}
+}
+
+// markMetersOffline flags a whole group of meters offline (used when their
+// MadBus instance is unreachable), preserving each one's last-good reading.
+func markMetersOffline(logger *slog.Logger, db *sql.DB, meters []EnergyMeter) {
+	for _, m := range meters {
+		if err := markDeviceOffline(db, tableEnergyMeter, m.ID); err != nil {
+			logger.Error("failed to mark meter offline", "id", m.ID, "error", err)
+		}
+	}
+}
+
+// readMadbus performs one MadBus measurements round-trip for the given meters
+// and returns the response devices keyed by their MadBus id.
+func readMadbus(baseURL string, meters []EnergyMeter) (map[string]madbusDevice, error) {
+	sels := make([]madbusSelector, 0, len(meters))
+	for _, m := range meters {
+		sels = append(sels, madbusSelector{ID: m.MadbusID})
+	}
+
+	body, err := json.Marshal(madbusRequest{Devices: sels})
+	if err != nil {
+		return nil, fmt.Errorf("encode madbus request: %w", err)
+	}
+
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/v1/measurements"
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build madbus request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := madbusClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("madbus returned HTTP %d", resp.StatusCode)
+	}
+
+	var out madbusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode madbus response: %w", err)
+	}
+
+	devices := make(map[string]madbusDevice, len(out.Devices))
+	for _, d := range out.Devices {
+		devices[d.Device.ID] = d
+	}
+
+	return devices, nil
+}
+
+// buildMeterStatus maps a MadBus device's measurements into an EnergyMeterStatus,
+// rounding each metric to a sensible precision. status is "stale" if MadBus
+// flagged any measurement stale (values kept, but shown as not-fresh), else
+// "online". The caller has already established the device is online.
+func buildMeterStatus(m EnergyMeter, dev madbusDevice) EnergyMeterStatus {
+	stale := false
+	for _, mm := range dev.Measurements {
+		if mm.Stale {
+			stale = true
+			break
+		}
+	}
+
+	status := "online"
+	if stale {
+		status = "stale"
+	}
+
+	return EnergyMeterStatus{
+		ID:            m.ID,
+		Source:        m.Source,
+		MadbusID:      m.MadbusID,
+		Name:          m.Name,
+		Voltage:       meterMetric(dev, "ac.voltage", 1),
+		Current:       meterMetric(dev, "ac.current", 2),
+		Frequency:     meterMetric(dev, "ac.frequency", 2),
+		Power:         meterMetric(dev, "ac.power", 1),
+		ApparentPower: meterMetric(dev, "ac.power.apparent", 1),
+		ReactivePower: meterMetric(dev, "ac.power.reactive", 1),
+		PowerFactor:   meterMetric(dev, "ac.power_factor", 3),
+		EnergyImport:  meterMetric(dev, "ac.energy.import", 2),
+		EnergyExport:  meterMetric(dev, "ac.energy.export", 2),
+		EnergyTotal:   meterMetric(dev, "ac.energy.total", 2),
+		Status:        status,
+	}
+}
+
+// meterMetric extracts and rounds one measurement, returning SQL NULL when the
+// metric is absent or its value is null.
+func meterMetric(dev madbusDevice, key string, decimals int) sql.NullFloat64 {
+	mm, ok := dev.Measurements[key]
+	if !ok || mm.Value == nil {
+		return sql.NullFloat64{}
+	}
+	return sql.NullFloat64{Float64: roundTo(*mm.Value, decimals), Valid: true}
+}
+
+// roundTo rounds v to the given number of decimal places.
+func roundTo(v float64, decimals int) float64 {
+	scale := math.Pow(10, float64(decimals))
+	return math.Round(v*scale) / scale
+}
+
+// printMeter logs one meter reading when debug is enabled (mirrors the Victron
+// printX debug helpers).
+func printMeter(m EnergyMeterStatus) {
+	nf := func(n sql.NullFloat64) string {
+		if !n.Valid {
+			return "—"
+		}
+		return fmt.Sprintf("%g", n.Float64)
+	}
+	fmt.Printf("[meter %s] status=%s power=%sW V=%s A=%s Hz=%s pf=%s total=%skWh\n",
+		m.Name, m.Status, nf(m.Power), nf(m.Voltage), nf(m.Current),
+		nf(m.Frequency), nf(m.PowerFactor), nf(m.EnergyTotal))
 }
 
 func pollAndStore(

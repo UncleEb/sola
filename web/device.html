@@ -33,6 +33,7 @@
                         <option value="shunt">Battery Shunt</option>
                         <option value="charge_controller">Charge Controller</option>
                         <option value="system">System (pool aggregate)</option>
+                        <option value="energy_meter">Energy Meter (MadBus)</option>
                     </select>
                 </label>
 
@@ -41,11 +42,25 @@
                     <input id="name" class="field__input" type="text" maxlength="60" required>
                 </label>
 
-                <label class="field">
+                <label class="field field--modbus">
                     <span class="field__label">Modbus Unit ID</span>
                     <input id="modbus_unit" class="field__input" type="number" min="0" max="255"
                            placeholder="Leave blank if not connected">
                     <span class="field__hint">Blank = no Modbus port (e.g. a disconnected bank).</span>
+                </label>
+
+                <label class="field field--meter">
+                    <span class="field__label">MadBus Source</span>
+                    <input id="source" class="field__input" type="text" maxlength="60"
+                           placeholder="e.g. garage">
+                    <span class="field__hint">Name of a MadBus instance from the <code>madbus</code> list in config.json.</span>
+                </label>
+
+                <label class="field field--meter">
+                    <span class="field__label">MadBus Device ID</span>
+                    <input id="madbus_id" class="field__input" type="text" maxlength="120"
+                           placeholder="e.g. meter-1">
+                    <span class="field__hint">The device id within that MadBus instance.</span>
                 </label>
 
                 <label class="field-check field--shunt">

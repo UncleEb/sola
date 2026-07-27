@@ -17,6 +17,8 @@ const els = {
     modbusUnit: document.getElementById("modbus_unit"),
     aggregate: document.getElementById("aggregate"),
     maxAmperage: document.getElementById("max_amperage"),
+    source: document.getElementById("source"),
+    madbusId: document.getElementById("madbus_id"),
     error: document.getElementById("form-error"),
     submit: document.getElementById("submit-btn"),
 };
@@ -27,18 +29,23 @@ function typeDefaultName() {
             return "PV Charger";
         case "system":
             return "System";
+        case "energy_meter":
+            return "Energy Meter";
         default:
             return "New Bank";
     }
 }
 
 // Show only the fields that apply to the selected device type: the aggregate
-// checkbox is shunt-only, max amperage is charger-only, and a System device
-// takes neither (it is implicitly the aggregate).
+// checkbox is shunt-only, max amperage is charger-only, a System device takes
+// neither. An energy meter is MadBus-sourced, so it hides the Modbus field and
+// shows the MadBus source + device id instead.
 function syncTypeFields() {
     const type = els.type.value;
     document.querySelectorAll(".field--shunt").forEach((e) => (e.hidden = type !== "shunt"));
     document.querySelectorAll(".field--charger").forEach((e) => (e.hidden = type !== "charge_controller"));
+    document.querySelectorAll(".field--meter").forEach((e) => (e.hidden = type !== "energy_meter"));
+    document.querySelectorAll(".field--modbus").forEach((e) => (e.hidden = type === "energy_meter"));
 }
 
 function showError(message) {
@@ -96,6 +103,8 @@ async function init() {
             els.aggregate.checked = Boolean(device.aggregate);
             els.maxAmperage.value =
                 device.max_amperage === null || device.max_amperage === undefined ? "" : device.max_amperage;
+            els.source.value = device.source || "";
+            els.madbusId.value = device.madbus_id || "";
         } catch (err) {
             showError(`Failed to load device: ${err.message}`);
             els.submit.disabled = true;
@@ -122,6 +131,11 @@ els.form.addEventListener("submit", async (e) => {
         device.aggregate = els.aggregate.checked;
     } else if (type === "charge_controller" && els.maxAmperage.value !== "") {
         device.max_amperage = Number(els.maxAmperage.value);
+    } else if (type === "energy_meter") {
+        // MadBus-sourced: no Modbus unit; carries a source + madbus_id instead.
+        device.modbus_unit = null;
+        device.source = els.source.value.trim();
+        device.madbus_id = els.madbusId.value.trim();
     }
     // A system device carries neither an aggregate flag nor max amperage.
 

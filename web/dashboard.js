@@ -29,6 +29,8 @@ const els = {
     aggregate: document.getElementById("aggregate"),
     banksPanel: document.getElementById("banks-panel"),
     banks: document.getElementById("banks"),
+    metersPanel: document.getElementById("meters-panel"),
+    meters: document.getElementById("meters"),
     lastUpdate: document.getElementById("last-update"),
 };
 
@@ -102,6 +104,9 @@ function newestTimestamp(data) {
     }
     if (data.charger && data.charger.updated_at) {
         stamps.push(Date.parse(data.charger.updated_at));
+    }
+    for (const m of data.meters || []) {
+        if (m.updated_at) stamps.push(Date.parse(m.updated_at));
     }
     return stamps.length ? Math.max(...stamps) : null;
 }
@@ -376,6 +381,39 @@ function bankCard(bank) {
         </div>`;
 }
 
+// AC energy meters (MadBus-sourced). Rendered as cards like the battery banks.
+function renderMeters(meters) {
+    const list = meters || [];
+    if (list.length === 0) {
+        setPanelVisible(els.metersPanel, false);
+        return;
+    }
+    setPanelVisible(els.metersPanel, true);
+    els.meters.innerHTML = list.map(meterCard).join("");
+}
+
+function meterCard(m) {
+    // status is "online" | "stale" | "offline"; anything else reads as offline.
+    let state = m.status === "online" || m.status === "stale" ? m.status : "offline";
+    const stateText = state === "online" ? "Online" : state === "stale" ? "Stale" : "Offline";
+
+    return `
+        <div class="bank bank--${state} clickable" data-device-id="${m.id}">
+            <div class="bank__head">
+                <span class="bank__name">${m.name}</span>
+                <span class="status-dot status-dot--${state}">${stateText}</span>
+            </div>
+            <div class="bank__readings">
+                ${reading(m.power, 1, "W", "Power", "pv")}
+                ${reading(m.voltage, 1, "V", "Voltage")}
+                ${reading(m.current, 2, "A", "Current")}
+                ${reading(m.frequency, 2, "Hz", "Frequency")}
+                ${reading(m.power_factor, 3, "", "Power Factor")}
+                ${reading(m.energy_total, 2, "kWh", "Total Energy", "battery")}
+            </div>
+        </div>`;
+}
+
 function setConnection(kind, text) {
     els.connection.className = `pill pill--${kind}`;
     els.connectionText.textContent = text;
@@ -442,6 +480,7 @@ async function refresh() {
     renderCharger(data.charger);
     renderAggregate(data.shunts, charging, data.soc_low_percent);
     renderBanks(data.shunts);
+    renderMeters(data.meters);
 
     if (DEMO) {
         setConnection("live", "Demo");

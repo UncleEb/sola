@@ -10,6 +10,7 @@ import (
 const (
 	tableBatteryShunt     = "battery_shunt_status"
 	tableChargeController = "charge_controller_status"
+	tableEnergyMeter      = "energy_meter_status"
 )
 
 // ShuntStatus is a single current-status snapshot for one battery shunt,
@@ -120,6 +121,42 @@ CREATE TABLE IF NOT EXISTS charge_controller_history (
     charge_state    INTEGER,
     mpp_mode        INTEGER,
     error_code      INTEGER,
+    PRIMARY KEY (device_id, ts)
+) WITHOUT ROWID;
+
+-- AC energy meter, sourced from a MadBus instance over HTTP. Identity is the
+-- MadBus (source, madbus_id) pair rather than a Modbus unit. Metric columns are
+-- nullable: they are SQL NULL when the meter is offline or a value is stale/
+-- absent, mirroring how a never-read Victron device carries NULLs. status is
+-- 'online', 'stale' (values present but MadBus flagged them stale), or 'offline'.
+CREATE TABLE IF NOT EXISTS energy_meter_status (
+    id             INTEGER PRIMARY KEY,
+    source         TEXT    NOT NULL,
+    madbus_id      TEXT    NOT NULL,
+    name           TEXT    NOT NULL,
+    voltage        REAL,
+    current        REAL,
+    frequency      REAL,
+    power          REAL,
+    apparent_power REAL,
+    reactive_power REAL,
+    power_factor   REAL,
+    energy_import  REAL,
+    energy_export  REAL,
+    energy_total   REAL,
+    status         TEXT    NOT NULL DEFAULT 'offline',
+    updated_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS energy_meter_history (
+    device_id    INTEGER NOT NULL,
+    ts           TEXT    NOT NULL,
+    voltage      REAL,
+    current      REAL,
+    power        REAL,
+    frequency    REAL,
+    power_factor REAL,
+    energy_total REAL,
     PRIMARY KEY (device_id, ts)
 ) WITHOUT ROWID;`
 
@@ -261,6 +298,113 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	)
 	if err != nil {
 		return fmt.Errorf("insert charge controller history %d: %w", c.ID, err)
+	}
+
+	return nil
+}
+
+// EnergyMeterStatus is a single current-status snapshot for one AC energy meter
+// sourced from MadBus. Metric fields are sql.NullFloat64 so a value MadBus
+// reports as null (offline/stale/absent) is stored as SQL NULL rather than a
+// misleading zero. Status is "online" or "stale"; an offline meter is recorded
+// via markDeviceOffline, which preserves its last-good readings.
+type EnergyMeterStatus struct {
+	ID       int
+	Source   string
+	MadbusID string
+	Name     string
+
+	Voltage       sql.NullFloat64
+	Current       sql.NullFloat64
+	Frequency     sql.NullFloat64
+	Power         sql.NullFloat64
+	ApparentPower sql.NullFloat64
+	ReactivePower sql.NullFloat64
+	PowerFactor   sql.NullFloat64
+	EnergyImport  sql.NullFloat64
+	EnergyExport  sql.NullFloat64
+	EnergyTotal   sql.NullFloat64
+
+	Status string // "online" | "stale"
+}
+
+// upsertEnergyMeter writes the latest reading for one energy meter, keeping
+// exactly one current row per device ID. Unlike the Victron upserts, status is
+// explicit (online vs stale): MadBus can serve values it has flagged stale after
+// a device drops.
+func upsertEnergyMeter(db *sql.DB, m EnergyMeterStatus, updatedAt string) error {
+	const query = `
+INSERT INTO energy_meter_status
+    (id, source, madbus_id, name, voltage, current, frequency, power,
+     apparent_power, reactive_power, power_factor,
+     energy_import, energy_export, energy_total, status, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    source         = excluded.source,
+    madbus_id      = excluded.madbus_id,
+    name           = excluded.name,
+    voltage        = excluded.voltage,
+    current        = excluded.current,
+    frequency      = excluded.frequency,
+    power          = excluded.power,
+    apparent_power = excluded.apparent_power,
+    reactive_power = excluded.reactive_power,
+    power_factor   = excluded.power_factor,
+    energy_import  = excluded.energy_import,
+    energy_export  = excluded.energy_export,
+    energy_total   = excluded.energy_total,
+    status         = excluded.status,
+    updated_at     = excluded.updated_at;`
+
+	_, err := db.Exec(
+		query,
+		m.ID, m.Source, m.MadbusID, m.Name,
+		m.Voltage, m.Current, m.Frequency, m.Power,
+		m.ApparentPower, m.ReactivePower, m.PowerFactor,
+		m.EnergyImport, m.EnergyExport, m.EnergyTotal,
+		m.Status, updatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert energy meter %q: %w", m.Name, err)
+	}
+
+	return nil
+}
+
+// insertEnergyMeterHistory appends one historical snapshot for an energy meter
+// (the graph-worthy subset of its metrics). See insertShuntHistory for the OR
+// IGNORE rationale.
+func insertEnergyMeterHistory(db *sql.DB, m EnergyMeterStatus, ts string) error {
+	const query = `
+INSERT OR IGNORE INTO energy_meter_history
+    (device_id, ts, voltage, current, power, frequency, power_factor, energy_total)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := db.Exec(
+		query,
+		m.ID, ts,
+		m.Voltage, m.Current, m.Power, m.Frequency, m.PowerFactor, m.EnergyTotal,
+	)
+	if err != nil {
+		return fmt.Errorf("insert energy meter history %d: %w", m.ID, err)
+	}
+
+	return nil
+}
+
+// seedEnergyMeter registers an energy meter's identity row (id, source,
+// madbus_id, name). Like seedDevice, a new device is inserted offline with NULL
+// readings; an existing row has only its identity refreshed.
+func seedEnergyMeter(db *sql.DB, id int, source, madbusID, name string) error {
+	const query = `
+INSERT INTO energy_meter_status (id, source, madbus_id, name) VALUES (?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    source    = excluded.source,
+    madbus_id = excluded.madbus_id,
+    name      = excluded.name;`
+
+	if _, err := db.Exec(query, id, source, madbusID, name); err != nil {
+		return fmt.Errorf("seed energy meter %d: %w", id, err)
 	}
 
 	return nil
