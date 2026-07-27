@@ -121,6 +121,12 @@ func (s *dashboardServer) routes() http.Handler {
 	// Live device discovery for a MadBus source (populates the device form's
 	// MadBus device-id picker). Server-side so no CORS is involved.
 	mux.HandleFunc("GET /api/sources/{name}/devices", s.handleListSourceDevices)
+	// Connection test used by the source form's "Test Connection" gate — the
+	// UI refuses to save a source until this returns ok for its parameters.
+	mux.HandleFunc("POST /api/sources/test", s.handleTestSource)
+	// Per-unit Modbus test used by the device form's "Test Connection" gate:
+	// verifies a specific unit ID actually responds before a device is saved.
+	mux.HandleFunc("POST /api/devices/test", s.handleTestDevice)
 
 	// Display settings (currently just the background).
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
@@ -848,6 +854,99 @@ func (s *dashboardServer) handleListSourceDevices(w http.ResponseWriter, r *http
 	}
 
 	writeJSON(w, out)
+}
+
+// testSourceBody is a candidate source's connection parameters to probe.
+type testSourceBody struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+// testSourceResult reports whether the probe connected; Error carries the
+// underlying reason on failure so the form can show it.
+type testSourceResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// handleTestSource probes a candidate source's connection without saving it, so
+// the form can refuse to persist an endpoint it can't reach. It always responds
+// 200 with {ok,error}; a failed connection is a normal result, not an HTTP error.
+func (s *dashboardServer) handleTestSource(w http.ResponseWriter, r *http.Request) {
+	var body testSourceBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.URL == "" {
+		writeJSON(w, testSourceResult{Error: "url is required"})
+		return
+	}
+
+	var err error
+	switch body.Type {
+	case SourceTypeModbus:
+		err = testModbusConnection(body.URL)
+	case SourceTypeMadbus:
+		err = testMadbusConnection(body.URL)
+	default:
+		writeJSON(w, testSourceResult{Error: fmt.Sprintf("unknown source type %q", body.Type)})
+		return
+	}
+	if err != nil {
+		writeJSON(w, testSourceResult{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, testSourceResult{OK: true})
+}
+
+// testDeviceBody is a candidate device's connection parameters to probe.
+type testDeviceBody struct {
+	Source     string `json:"source"`
+	DeviceType string `json:"device_type"`
+	ModbusUnit *int   `json:"modbus_unit"`
+}
+
+// handleTestDevice probes a candidate Modbus device by reading its unit's
+// registers, so the form can refuse to save a device whose unit doesn't respond.
+// MadBus devices are verified by the live device-id picker instead, so this is
+// Modbus-only. Always responds 200 with {ok,error}.
+func (s *dashboardServer) handleTestDevice(w http.ResponseWriter, r *http.Request) {
+	var body testDeviceBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.ModbusUnit == nil {
+		writeJSON(w, testSourceResult{Error: "a Modbus unit ID is required to test"})
+		return
+	}
+
+	var src Source
+	found := false
+	for _, so := range s.currentConfig().Sources {
+		if so.Name == body.Source {
+			src = so
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeJSON(w, testSourceResult{Error: fmt.Sprintf("source %q not found", body.Source)})
+		return
+	}
+	if src.Type != SourceTypeModbus {
+		writeJSON(w, testSourceResult{Error: fmt.Sprintf("source %q is not a Modbus source", body.Source)})
+		return
+	}
+
+	if err := testModbusUnit(src.URL, body.DeviceType, *body.ModbusUnit); err != nil {
+		writeJSON(w, testSourceResult{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, testSourceResult{OK: true})
 }
 
 // settingsBody is the display-settings payload exchanged with the client.

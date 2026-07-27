@@ -127,7 +127,7 @@ func main() {
 		os.Exit(1)
 	} else if created {
 		logger.Info(
-			"wrote default configuration; edit the victron source in Settings → Data Sources and add your devices in the dashboard",
+			"wrote empty default configuration; open the dashboard and add a data source, then a device, under Settings → Data Sources",
 			"path", path,
 		)
 	}
@@ -299,6 +299,37 @@ func main() {
 				// web API only ever rewrites config.json.
 				if !reflect.DeepEqual(fresh.Devices, current.Devices) {
 					aggregate, banks, charger, meters = reconcileDevices(logger, db, current, fresh)
+				}
+
+				// Apply a change to the Modbus source live: first appearance (the
+				// user adds their Victron source on a fresh install), a URL edit, or
+				// removal. The client is otherwise built once at startup, so without
+				// this a newly-added source wouldn't poll until a restart. MODBUS_URL
+				// still wins if set. On (re)build the reconnect block below opens it
+				// this same tick.
+				applyModbusURLEnv(&fresh)
+				freshURL := ""
+				if src, ok := modbusSource(fresh); ok {
+					freshURL = src.URL
+				}
+				if freshURL != modbusURL {
+					if client != nil {
+						_ = client.Close()
+						client = nil
+						connected = false
+					}
+					modbusURL = freshURL
+					if modbusURL == "" {
+						logger.Info("Modbus source removed; polling stopped")
+					} else if c, err := modbus.NewClient(&modbus.ClientConfiguration{
+						URL:     modbusURL,
+						Timeout: modbusTimeout,
+					}); err != nil {
+						logger.Error("invalid Modbus source URL; polling disabled until corrected", "url", modbusURL, "error", err)
+					} else {
+						client = c
+						logger.Info("Modbus source changed; connecting on next cycle", "url", modbusURL)
+					}
 				}
 
 				current = fresh
@@ -502,6 +533,77 @@ func modbusSource(cfg Config) (Source, bool) {
 		}
 	}
 	return Source{}, false
+}
+
+// applyModbusURLEnv overrides the modbus source's URL with the MODBUS_URL env
+// var when set (legacy back-compat). It mutates cfg in place and is silent — the
+// startup path logs the override once, and the reload path applies it every
+// tick so a reloaded config keeps honoring the env.
+func applyModbusURLEnv(cfg *Config) {
+	url := os.Getenv("MODBUS_URL")
+	if url == "" {
+		return
+	}
+	for i := range cfg.Sources {
+		if cfg.Sources[i].Type == SourceTypeModbus {
+			cfg.Sources[i].URL = url
+			return
+		}
+	}
+}
+
+// testModbusConnection verifies a Modbus-TCP endpoint is reachable by opening
+// (and closing) a connection to it. It deliberately does not read registers:
+// unit/register mapping belongs to individual devices, so at the source level a
+// success means "a Modbus-TCP server is reachable at this address" — which is
+// what the "Test Connection" button promises before a source is saved.
+func testModbusConnection(url string) error {
+	client, err := modbus.NewClient(&modbus.ClientConfiguration{URL: url, Timeout: modbusTimeout})
+	if err != nil {
+		return err
+	}
+	if err := client.Open(); err != nil {
+		return err
+	}
+	return client.Close()
+}
+
+// testMadbusConnection verifies a MadBus endpoint answers by performing a real
+// measurements round-trip (empty selector = all devices). Reuses the same path
+// the poll loop and device discovery use, so a success here means polling works.
+func testMadbusConnection(url string) error {
+	_, err := madbusMeasurements(url, nil)
+	return err
+}
+
+// testModbusUnit verifies a specific Modbus unit (slave) ID responds on a source
+// by actually reading the registers that device type polls. Modbus has no unit
+// enumeration, so this read is the only real proof a unit exists — a plain TCP
+// connect (testModbusConnection) only proves the gateway is up, not that the
+// unit answers. Used by the device form's per-unit "Test Connection" gate.
+func testModbusUnit(url, deviceType string, unit int) error {
+	client, err := modbus.NewClient(&modbus.ClientConfiguration{URL: url, Timeout: modbusTimeout})
+	if err != nil {
+		return err
+	}
+	if err := client.Open(); err != nil {
+		return err
+	}
+	defer client.Close()
+
+	switch deviceType {
+	case DeviceTypeSystem:
+		_, err = readSystem(client, unit)
+	case DeviceTypeShunt:
+		// Reading the battery-service block proves the unit answers; that's the
+		// core of both the per-bank and aggregate reads.
+		err = readBatteryBank(client, &BatteryBank{UnitID: unit})
+	case DeviceTypeChargeController:
+		err = readSolarCharger(client, &SolarCharger{UnitID: unit})
+	default:
+		return fmt.Errorf("device type %q is not read over Modbus", deviceType)
+	}
+	return err
 }
 
 // statusTable maps a device type to its current-status table. Shunt/system

@@ -44,7 +44,7 @@ docker compose up -d --build
 
 The dashboard is then at **http://localhost:8088**.
 
-`config.json` and the SQLite database live in a named volume (`sola-data`, mounted at `/data`) and persist across restarts and upgrades. On first run against an empty volume, Sola writes a default `config.json`. Point Sola at your hardware from the dashboard under **Settings → Data Sources**: edit the seeded `victron` source to your Venus OS Modbus TCP endpoint, and add MadBus sources as needed.
+`config.json` and the SQLite database live in a named volume (`sola-data`, mounted at `/data`) and persist across restarts and upgrades. On first run against an empty volume, Sola writes an empty default `config.json` and the dashboard comes up with a welcome screen. Set up your hardware from the dashboard under **Settings → Data Sources**: add a data source (your Venus OS Modbus TCP endpoint and/or a MadBus HTTP endpoint), then add devices that read from it.
 
 The container runs as uid `65532`. A named volume gets writable ownership automatically; a bind mount (`-v /host/path:/data`) must be writable by uid `65532`. The image ships a `HEALTHCHECK` that runs `sola healthcheck` (which probes `/api/status` — the distroless image has no shell or curl).
 

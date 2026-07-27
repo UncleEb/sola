@@ -94,13 +94,13 @@ const defaultHTTPAddr = ":8088"
 const defaultSOCLowPercent = 50
 
 // DeviceConfig describes one device in the registry. ModbusUnit is a pointer so
-// that a null in the file (a device with no exposed Modbus port) is
-// distinguishable from unit 0.
+// a MadBus device's null unit is distinguishable from unit 0; a Modbus device
+// must always carry a unit (enforced by validate).
 type DeviceConfig struct {
 	ID          int      `json:"id"`
 	Name        string   `json:"name"`
 	DeviceType  string   `json:"device_type"`            // DeviceTypeShunt | DeviceTypeChargeController | DeviceTypeSystem | DeviceTypeEnergyMeter
-	ModbusUnit  *int     `json:"modbus_unit"`            // nil = no exposed port (Victron devices); always nil for MadBus-sourced devices
+	ModbusUnit  *int     `json:"modbus_unit"`            // required for Modbus devices; always nil for MadBus-sourced devices. Pointer so a MadBus device's null is distinct from unit 0.
 	Aggregate   bool     `json:"aggregate,omitempty"`    // shunt that owns pool SOC
 	MaxAmperage *float64 `json:"max_amperage,omitempty"` // charge_controller only: rated output amps, used to scale the dashboard flow animation
 	Source      string   `json:"source,omitempty"`       // name of the Source this device is read from
@@ -258,13 +258,11 @@ func migrateConfigFileOnce(path string, logger *slog.Logger) error {
 }
 
 // defaultConfig returns a minimal, valid configuration used to bootstrap a
-// fresh install (e.g. an empty mounted Docker volume). It is deliberately
-// generic: a single "victron" Modbus source with a placeholder URL — edited
-// from Settings → Data Sources (or overridden by the MODBUS_URL env var) — and a
-// single System aggregate device on the Venus default unit 100, so the dashboard
-// comes up and can be tailored from there.
+// fresh install (e.g. an empty mounted Docker volume). It has no data sources
+// and no devices: rather than guessing at hardware that may not exist, the
+// dashboard comes up empty and invites the user to add a data source, then a
+// device, from Settings. Everything else is a sensible default.
 func defaultConfig() Config {
-	unit := 100
 	return Config{
 		PollIntervalSeconds: 5,
 		DatabasePath:        "sola.db",
@@ -272,13 +270,9 @@ func defaultConfig() Config {
 		SOCLowPercent:       defaultSOCLowPercent,
 		Background:          defaultBackground,
 		HistoryIntervalSec:  defaultHistoryIntervalSec,
-		NextDeviceID:        2,
-		Sources: []Source{
-			{Name: "victron", Type: SourceTypeModbus, URL: "tcp://192.168.1.100:502"},
-		},
-		Devices: []DeviceConfig{
-			{ID: 1, Name: "Battery Pool", DeviceType: DeviceTypeSystem, ModbusUnit: &unit, Source: "victron"},
-		},
+		NextDeviceID:        1,
+		Sources:             []Source{},
+		Devices:             []DeviceConfig{},
 	}
 }
 
@@ -412,9 +406,9 @@ func (c Config) validate() error {
 		return fmt.Errorf("at most one modbus source is supported in this version, found %d", modbusSources)
 	}
 
-	if len(c.Devices) == 0 {
-		return errors.New("at least one device is required")
-	}
+	// A fresh install has no sources and no devices — the dashboard comes up
+	// empty and invites the user to add them. So zero devices is valid; the
+	// per-device rules below only apply once devices exist.
 
 	seen := make(map[int]bool)
 	aggregates := 0
@@ -446,6 +440,14 @@ func (c Config) validate() error {
 		if src.Type != wantType {
 			return fmt.Errorf("device %d (%s): requires a %q source, but %q is a %q source",
 				d.ID, d.DeviceType, wantType, d.Source, src.Type)
+		}
+
+		// Every Modbus device must name a unit: a device with no unit couldn't be
+		// polled, and a "no port" placeholder just leaves the user guessing whether
+		// it's misconfigured or genuinely offline. (Energy meters are MadBus-sourced
+		// and carry a madbus_id instead — checked in their case below.)
+		if wantType == SourceTypeModbus && d.ModbusUnit == nil {
+			return fmt.Errorf("device %d (%s): a Modbus unit ID is required", d.ID, d.DeviceType)
 		}
 
 		switch d.DeviceType {

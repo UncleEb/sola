@@ -238,6 +238,41 @@ main {
     margin: 0;
 }
 
+/* Source form "Test Connection" result line. */
+.test-status {
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    min-height: 1.2em;
+}
+
+.test-status--ok { color: var(--good); }
+.test-status--fail { color: var(--bad); }
+
+/* First-run welcome / no-devices state. */
+.empty-state__lead {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 0.5rem;
+}
+
+.empty-state__hint {
+    color: var(--muted);
+    line-height: 1.5;
+    margin: 0 0 1.25rem;
+    max-width: 60ch;
+}
+
+.empty-state__hint a {
+    color: var(--flow);
+}
+
+.empty-state__actions {
+    display: flex;
+    gap: 0.75rem;
+}
+
 /* ---- Solar charger ---- */
 
 /* The power-flow animation and its caption sit in their own block directly
@@ -652,6 +687,17 @@ main {
 
 .btn:hover {
     border-color: var(--flow);
+}
+
+.btn:disabled,
+.btn[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.btn:disabled:hover,
+.btn[disabled]:hover {
+    border-color: var(--glass-border);
 }
 
 .btn--primary {

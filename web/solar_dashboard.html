@@ -28,6 +28,22 @@
     </header>
 
     <main>
+        <!-- Shown only when no devices are configured (fresh install). All the
+             device panels below are hidden in that case; dashboard.js toggles
+             between this and them. -->
+        <section class="panel empty-state" id="empty-state" hidden>
+            <h2 class="panel__title">Welcome to Sola</h2>
+            <p class="empty-state__lead">No devices configured yet.</p>
+            <p class="empty-state__hint">
+                Head to <a href="/settings">Settings</a> to add a data source
+                (Venus OS or a MadBus endpoint), then add a device
+                that reads from it. Your readings will appear here.
+            </p>
+            <div class="empty-state__actions">
+                <a href="/settings" class="btn btn--primary">Go to Settings</a>
+            </div>
+        </section>
+
         <!-- Solar charger: PV in, battery out. The power-flow animation sits in
              its own block below the title, above the reading columns. -->
         <section class="panel" id="charger-panel">

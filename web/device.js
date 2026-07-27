@@ -26,6 +26,8 @@ const els = {
     maxAmperage: document.getElementById("max_amperage"),
     madbusId: document.getElementById("madbus_id"),
     madbusHint: document.getElementById("madbus-hint"),
+    testBtn: document.getElementById("test-btn"),
+    testStatus: document.getElementById("test-status"),
     error: document.getElementById("form-error"),
     submit: document.getElementById("submit-btn"),
 };
@@ -36,6 +38,56 @@ let allSources = [];
 // The MadBus device id we'd like selected once the picker is (re)loaded — the
 // existing id in edit mode, cleared whenever the source changes.
 let desiredMadbusId = "";
+
+// Whether the current Modbus unit has passed a "Test Connection". Cleared on any
+// change to the unit, source, or type. MadBus devices don't use this — their
+// live device picker is the verification.
+let modbusVerified = false;
+
+function isModbusSource() {
+    const src = selectedSource();
+    return Boolean(src && src.type === "modbus");
+}
+
+function modbusUnitBlank() {
+    return els.modbusUnit.value.trim() === "";
+}
+
+// Decide whether Save is allowed. MadBus: a device must be picked. Modbus: the
+// unit must pass a connection test — no blank/"disconnected" devices, so the
+// user never has to wonder whether a device is misconfigured or just offline.
+function updateSubmitState() {
+    const src = selectedSource();
+    if (!src) {
+        els.submit.disabled = true;
+        return;
+    }
+    if (src.type === "madbus") {
+        els.submit.disabled = !els.madbusId.value;
+        return;
+    }
+    els.submit.disabled = !modbusVerified;
+}
+
+function setTestStatus(message, ok) {
+    els.testStatus.textContent = message;
+    els.testStatus.className = "test-status" +
+        (ok === true ? " test-status--ok" : ok === false ? " test-status--fail" : "");
+}
+
+// Invalidate any prior Modbus test and recompute Save. Called whenever the unit,
+// source, or type changes.
+function invalidateModbusTest() {
+    modbusVerified = false;
+    if (!isModbusSource()) {
+        setTestStatus("", null);
+    } else if (modbusUnitBlank()) {
+        setTestStatus("Enter a Modbus unit ID, then test the connection to enable saving.", null);
+    } else {
+        setTestStatus("Test the connection to enable saving.", null);
+    }
+    updateSubmitState();
+}
 
 function compatibleSourceType(deviceType) {
     return deviceType === "energy_meter" ? "madbus" : "modbus";
@@ -73,7 +125,8 @@ function populateSources(selected) {
     }
 
     els.source.disabled = false;
-    els.submit.disabled = false;
+    // Save stays gated by the connection test (Modbus) or device picker (MadBus);
+    // syncSourceFields sets the correct state right after this.
     els.sourceHint.textContent = "The source Sola reads this device from. Manage sources under Settings → Data Sources.";
 
     if (selected && compatible.some((s) => s.name === selected)) {
@@ -110,7 +163,11 @@ function syncSourceFields() {
     document.querySelectorAll(".field--modbus").forEach((e) => (e.hidden = isMadbus));
     document.querySelectorAll(".field--madbus").forEach((e) => (e.hidden = !isMadbus));
     if (isMadbus) {
+        setTestStatus("", null);
         loadMadbusDevices();
+    } else {
+        // Modbus: gate Save on a per-unit connection test.
+        invalidateModbusTest();
     }
 }
 
@@ -201,6 +258,49 @@ function hideError() {
 let nameEdited = false;
 els.name.addEventListener("input", () => (nameEdited = true));
 
+// Changing the unit invalidates a prior test (and recomputes Save).
+els.modbusUnit.addEventListener("input", invalidateModbusTest);
+
+els.testBtn.addEventListener("click", async () => {
+    hideError();
+    const src = selectedSource();
+    if (!src || src.type !== "modbus") {
+        return;
+    }
+    if (modbusUnitBlank()) {
+        setTestStatus("Enter a Modbus unit ID to test.", false);
+        return;
+    }
+
+    els.testBtn.disabled = true;
+    setTestStatus("Testing connection…", null);
+    try {
+        const resp = await fetch("/api/devices/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                source: src.name,
+                device_type: els.type.value,
+                modbus_unit: Number(els.modbusUnit.value),
+            }),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+            modbusVerified = true;
+            setTestStatus(`Unit ${els.modbusUnit.value.trim()} responded — you can save.`, true);
+        } else {
+            modbusVerified = false;
+            setTestStatus(`Test failed: ${result.error || "no response"}`, false);
+        }
+    } catch (err) {
+        modbusVerified = false;
+        setTestStatus(`Test failed: ${err.message}`, false);
+    } finally {
+        els.testBtn.disabled = false;
+        updateSubmitState();
+    }
+});
+
 els.source.addEventListener("change", () => {
     // A different source reports different devices, so drop any remembered id.
     desiredMadbusId = "";
@@ -224,6 +324,11 @@ els.type.addEventListener("change", () => {
     }
     if (els.type.value === "system" && !els.modbusUnit.value) {
         els.modbusUnit.value = "100"; // Venus System service default unit
+    }
+    // Prefilling the unit programmatically doesn't fire an input event, so
+    // recompute the test gate for the new default.
+    if (isModbusSource()) {
+        invalidateModbusTest();
     }
 });
 
@@ -313,6 +418,15 @@ els.form.addEventListener("submit", async (e) => {
         }
     } else {
         device.modbus_unit = els.modbusUnit.value === "" ? null : Number(els.modbusUnit.value);
+        if (device.modbus_unit === null) {
+            showError("Enter a Modbus unit ID and test the connection before saving.");
+            return;
+        }
+        // The unit must have passed a connection test.
+        if (!modbusVerified) {
+            showError("Test the Modbus connection before saving.");
+            return;
+        }
     }
 
     if (type === "shunt") {

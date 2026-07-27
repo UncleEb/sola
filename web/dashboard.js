@@ -22,6 +22,7 @@ const WAVE_FALLBACK_FRACTION = 0.6;
 const els = {
     connection: document.getElementById("connection"),
     connectionText: document.getElementById("connection-text"),
+    emptyState: document.getElementById("empty-state"),
     chargerPanel: document.getElementById("charger-panel"),
     charger: document.getElementById("charger"),
     chargerFlow: document.getElementById("charger-flow"),
@@ -474,6 +475,15 @@ async function refresh() {
         data = applyDemo(data);
     }
 
+    // Fresh install: nothing configured at all. Show the welcome/empty state
+    // instead of a page of hidden panels. Offline devices still appear in these
+    // arrays (seeded rows), so empty across the board means no devices exist.
+    const hasDevices =
+        (data.shunts && data.shunts.length > 0) ||
+        !!data.charger ||
+        (data.meters && data.meters.length > 0);
+    setPanelVisible(els.emptyState, !hasDevices && !DEMO);
+
     // Charging drives both the flow wave and the SOC ring's rising sweep.
     const charging = !!data.charger && flowAmplitude(data.charger) > 0;
 
@@ -485,6 +495,15 @@ async function refresh() {
     if (DEMO) {
         setConnection("live", "Demo");
         els.lastUpdate.textContent = "DEMO MODE — synthetic charge data, not real readings";
+        return;
+    }
+
+    // Nothing configured yet: the welcome state already explains what to do, so
+    // keep the status line calm rather than reporting "no readings" as if
+    // something were wrong.
+    if (!hasDevices) {
+        setConnection("unknown", "No devices configured");
+        els.lastUpdate.textContent = "Add a data source and a device to begin";
         return;
     }
 

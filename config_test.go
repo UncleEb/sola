@@ -34,20 +34,14 @@ func TestEnsureDefaultConfigBootstraps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default config failed to load/validate: %v", err)
 	}
-	if len(cfg.Devices) != 1 || cfg.Devices[0].DeviceType != DeviceTypeSystem {
-		t.Fatalf("unexpected default devices: %+v", cfg.Devices)
-	}
 
-	// The default must ship exactly one Modbus "victron" source, and the seeded
-	// System device must reference it.
-	if len(cfg.Sources) != 1 {
-		t.Fatalf("expected 1 default source, got %d: %+v", len(cfg.Sources), cfg.Sources)
+	// A fresh install ships empty: no devices and no sources. The dashboard
+	// comes up with a welcome/empty state inviting the user to add them.
+	if len(cfg.Devices) != 0 {
+		t.Fatalf("expected no default devices, got %d: %+v", len(cfg.Devices), cfg.Devices)
 	}
-	if s := cfg.Sources[0]; s.Name != "victron" || s.Type != SourceTypeModbus {
-		t.Fatalf("unexpected default source: %+v", s)
-	}
-	if cfg.Devices[0].Source != "victron" {
-		t.Fatalf("seeded device should reference victron source, got %q", cfg.Devices[0].Source)
+	if len(cfg.Sources) != 0 {
+		t.Fatalf("expected no default sources, got %d: %+v", len(cfg.Sources), cfg.Sources)
 	}
 
 	if created2, err := ensureDefaultConfig(path); err != nil || created2 {
@@ -239,6 +233,9 @@ func TestValidateSources(t *testing.T) {
 		{"cross-type mismatch: shunt on madbus source", func(c *Config) {
 			c.Sources = append(c.Sources, Source{Name: "garage", Type: SourceTypeMadbus, URL: "http://10.0.0.9:8090"})
 			c.Devices = append(c.Devices, DeviceConfig{ID: 2, Name: "Shunt", DeviceType: DeviceTypeShunt, Source: "garage"})
+		}, true},
+		{"modbus device missing unit", func(c *Config) {
+			c.Devices = append(c.Devices, DeviceConfig{ID: 2, Name: "Bank", DeviceType: DeviceTypeShunt, Source: "victron"})
 		}, true},
 	}
 

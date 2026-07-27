@@ -51,8 +51,8 @@
                 <label class="field field--modbus">
                     <span class="field__label">Modbus Unit ID</span>
                     <input id="modbus_unit" class="field__input" type="number" min="0" max="255"
-                           placeholder="Leave blank if not connected">
-                    <span class="field__hint">Blank = no Modbus port (e.g. a disconnected bank).</span>
+                           placeholder="e.g. 239">
+                    <span class="field__hint">The Venus OS Modbus unit (slave) ID for this device.</span>
                 </label>
 
                 <label class="field field--madbus">
@@ -77,8 +77,11 @@
 
                 <div class="form__actions">
                     <a href="/settings" class="btn">Cancel</a>
-                    <button type="submit" class="btn btn--primary" id="submit-btn">Add Device</button>
+                    <button type="button" class="btn field--modbus" id="test-btn">Test Connection</button>
+                    <button type="submit" class="btn btn--primary" id="submit-btn" disabled>Add Device</button>
                 </div>
+
+                <div id="test-status" class="test-status" aria-live="polite"></div>
             </form>
         </section>
     </main>

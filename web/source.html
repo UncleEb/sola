@@ -43,19 +43,32 @@
                     <span class="field__hint">Devices reference this source by name. Fixed once created.</span>
                 </label>
 
+                <!-- Host + port for both source types. The user never types a
+                     scheme: Modbus assumes TCP, MadBus assumes HTTP. Only the
+                     default port and the assembled scheme differ by type. -->
                 <label class="field">
-                    <span class="field__label">URL</span>
-                    <input id="url" class="field__input" type="text" maxlength="200" required
-                           placeholder="tcp://192.168.1.100:502">
-                    <span class="field__hint" id="url-hint"></span>
+                    <span class="field__label">Host / IP</span>
+                    <input id="host" class="field__input" type="text" maxlength="200"
+                           placeholder="192.168.1.100">
+                    <span class="field__hint" id="host-hint"></span>
+                </label>
+
+                <label class="field">
+                    <span class="field__label">Port</span>
+                    <input id="port" class="field__input" type="number" min="1" max="65535"
+                           placeholder="502">
+                    <span class="field__hint" id="port-hint"></span>
                 </label>
 
                 <div id="form-error" class="form__error" hidden></div>
 
                 <div class="form__actions">
                     <a href="/settings" class="btn">Cancel</a>
-                    <button type="submit" class="btn btn--primary" id="submit-btn">Add Source</button>
+                    <button type="button" class="btn" id="test-btn">Test Connection</button>
+                    <button type="submit" class="btn btn--primary" id="submit-btn" disabled>Add Source</button>
                 </div>
+
+                <div id="test-status" class="test-status" aria-live="polite"></div>
             </form>
         </section>
     </main>
