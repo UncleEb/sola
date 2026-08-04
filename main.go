@@ -864,10 +864,24 @@ func buildMeterStatus(m EnergyMeter, dev madbusDevice) EnergyMeterStatus {
 		ApparentPower: meterMetric(dev, "ac.power.apparent", 1),
 		ReactivePower: meterMetric(dev, "ac.power.reactive", 1),
 		PowerFactor:   meterMetric(dev, "ac.power_factor", 3),
-		EnergyImport:  meterMetric(dev, "ac.energy.import", 2),
-		EnergyExport:  meterMetric(dev, "ac.energy.export", 2),
-		EnergyTotal:   meterMetric(dev, "ac.energy.total", 2),
-		Status:        status,
+
+		// Per-leg (split-phase). Absent keys stay NULL, so a single-phase meter
+		// simply reports none of these.
+		CurrentL1:       meterMetric(dev, "ac.current.l1", 2),
+		CurrentL2:       meterMetric(dev, "ac.current.l2", 2),
+		PowerL1:         meterMetric(dev, "ac.power.l1", 1),
+		PowerL2:         meterMetric(dev, "ac.power.l2", 1),
+		ApparentPowerL1: meterMetric(dev, "ac.power.apparent.l1", 1),
+		ApparentPowerL2: meterMetric(dev, "ac.power.apparent.l2", 1),
+		ReactivePowerL1: meterMetric(dev, "ac.power.reactive.l1", 1),
+		ReactivePowerL2: meterMetric(dev, "ac.power.reactive.l2", 1),
+		PowerFactorL1:   meterMetric(dev, "ac.power_factor.l1", 3),
+		PowerFactorL2:   meterMetric(dev, "ac.power_factor.l2", 3),
+
+		EnergyImport: meterMetric(dev, "ac.energy.import", 2),
+		EnergyExport: meterMetric(dev, "ac.energy.export", 2),
+		EnergyTotal:  meterMetric(dev, "ac.energy.total", 2),
+		Status:       status,
 	}
 }
 

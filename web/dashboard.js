@@ -412,7 +412,44 @@ function meterPanel(m) {
                 ${reading(m.energy_export, 2, "kWh", "Exported", "pv")}
                 ${reading(m.energy_total, 2, "kWh", "Total Energy", "battery")}
             </div>
+            ${meterLegs(m)}
         </section>`;
+}
+
+// meterLegs renders the split-phase L1/L2 breakout below the whole-meter
+// totals. Voltage and frequency are single-value (no per-leg), so only
+// power/current/apparent/reactive/pf split. Rendered only when the meter
+// actually reports per-leg data (a single-phase meter carries none). A leg
+// legitimately reads 0 when nothing draws on it.
+function meterLegs(m) {
+    const hasLegs = [m.power_l1, m.power_l2, m.current_l1, m.current_l2]
+        .some((v) => v !== null && v !== undefined);
+    if (!hasLegs) {
+        return "";
+    }
+
+    return `
+        <div class="meter__legs-section">
+            <h3 class="meter__subtitle">Per-leg breakdown</h3>
+            <div class="meter__legs">
+                ${meterLeg("L1", m.power_l1, m.current_l1, m.apparent_power_l1, m.reactive_power_l1, m.power_factor_l1)}
+                ${meterLeg("L2", m.power_l2, m.current_l2, m.apparent_power_l2, m.reactive_power_l2, m.power_factor_l2)}
+            </div>
+        </div>`;
+}
+
+function meterLeg(title, power, current, apparent, reactive, pf) {
+    return `
+        <div class="meter__leg">
+            <h4 class="meter__leg-title">${title}</h4>
+            <div class="reading-grid">
+                ${reading(power, 1, "W", "Power", "pv")}
+                ${reading(current, 2, "A", "Current")}
+                ${reading(apparent, 1, "VA", "Apparent")}
+                ${reading(reactive, 1, "var", "Reactive")}
+                ${reading(pf, 3, "", "Power Factor")}
+            </div>
+        </div>`;
 }
 
 function setConnection(kind, text) {

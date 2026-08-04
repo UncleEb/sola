@@ -129,34 +129,54 @@ CREATE TABLE IF NOT EXISTS charge_controller_history (
 -- nullable: they are SQL NULL when the meter is offline or a value is stale/
 -- absent, mirroring how a never-read Victron device carries NULLs. status is
 -- 'online', 'stale' (values present but MadBus flagged them stale), or 'offline'.
+-- Per-leg columns (…_l1/…_l2) break out split-phase meters; voltage/frequency
+-- stay single-value (the meter reports one of each). Aggregates remain the
+-- whole-meter totals (power = L1+L2, current = leg average). Added after the
+-- initial release, so addMissingColumns backfills them on existing databases.
 CREATE TABLE IF NOT EXISTS energy_meter_status (
-    id             INTEGER PRIMARY KEY,
-    source         TEXT    NOT NULL,
-    madbus_id      TEXT    NOT NULL,
-    name           TEXT    NOT NULL,
-    voltage        REAL,
-    current        REAL,
-    frequency      REAL,
-    power          REAL,
-    apparent_power REAL,
-    reactive_power REAL,
-    power_factor   REAL,
-    energy_import  REAL,
-    energy_export  REAL,
-    energy_total   REAL,
-    status         TEXT    NOT NULL DEFAULT 'offline',
-    updated_at     TEXT
+    id                INTEGER PRIMARY KEY,
+    source            TEXT    NOT NULL,
+    madbus_id         TEXT    NOT NULL,
+    name              TEXT    NOT NULL,
+    voltage           REAL,
+    current           REAL,
+    frequency         REAL,
+    power             REAL,
+    apparent_power    REAL,
+    reactive_power    REAL,
+    power_factor      REAL,
+    current_l1        REAL,
+    current_l2        REAL,
+    power_l1          REAL,
+    power_l2          REAL,
+    apparent_power_l1 REAL,
+    apparent_power_l2 REAL,
+    reactive_power_l1 REAL,
+    reactive_power_l2 REAL,
+    power_factor_l1   REAL,
+    power_factor_l2   REAL,
+    energy_import     REAL,
+    energy_export     REAL,
+    energy_total      REAL,
+    status            TEXT    NOT NULL DEFAULT 'offline',
+    updated_at        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS energy_meter_history (
-    device_id    INTEGER NOT NULL,
-    ts           TEXT    NOT NULL,
-    voltage      REAL,
-    current      REAL,
-    power        REAL,
-    frequency    REAL,
-    power_factor REAL,
-    energy_total REAL,
+    device_id       INTEGER NOT NULL,
+    ts              TEXT    NOT NULL,
+    voltage         REAL,
+    current         REAL,
+    power           REAL,
+    frequency       REAL,
+    power_factor    REAL,
+    energy_total    REAL,
+    power_l1        REAL,
+    power_l2        REAL,
+    current_l1      REAL,
+    current_l2      REAL,
+    power_factor_l1 REAL,
+    power_factor_l2 REAL,
     PRIMARY KEY (device_id, ts)
 ) WITHOUT ROWID;`
 
@@ -164,6 +184,67 @@ CREATE TABLE IF NOT EXISTS energy_meter_history (
 		return fmt.Errorf("create schema: %w", err)
 	}
 
+	// Backfill columns added after a database was first created. CREATE TABLE IF
+	// NOT EXISTS never alters an existing table, so new columns need an explicit
+	// ADD COLUMN. (A minimal stand-in until formal migrations — see TODO.md.)
+	perLegColumns := []string{
+		"current_l1", "current_l2",
+		"power_l1", "power_l2",
+		"apparent_power_l1", "apparent_power_l2",
+		"reactive_power_l1", "reactive_power_l2",
+		"power_factor_l1", "power_factor_l2",
+	}
+	for _, col := range perLegColumns {
+		if err := addMissingColumn(db, tableEnergyMeter, col, "REAL"); err != nil {
+			return err
+		}
+	}
+	// Graph-worthy per-leg columns for history (power/current/pf per leg).
+	perLegHistoryColumns := []string{
+		"power_l1", "power_l2",
+		"current_l1", "current_l2",
+		"power_factor_l1", "power_factor_l2",
+	}
+	for _, col := range perLegHistoryColumns {
+		if err := addMissingColumn(db, "energy_meter_history", col, "REAL"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// addMissingColumn adds column to table (with the given type/DDL) only if it is
+// not already present, so schema additions apply to databases created by earlier
+// versions. It is idempotent: a column that already exists is left untouched.
+func addMissingColumn(db *sql.DB, table, column, ddl string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s);", table))
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid         int
+			name, ctype string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan %s column info: %w", table, err)
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s column info: %w", table, err)
+	}
+
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", table, column, ddl)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
 	return nil
 }
 
@@ -321,9 +402,24 @@ type EnergyMeterStatus struct {
 	ApparentPower sql.NullFloat64
 	ReactivePower sql.NullFloat64
 	PowerFactor   sql.NullFloat64
-	EnergyImport  sql.NullFloat64
-	EnergyExport  sql.NullFloat64
-	EnergyTotal   sql.NullFloat64
+
+	// Per-leg (split-phase L1/L2). Voltage and frequency are single-value on this
+	// meter, so they have no per-leg counterparts. A leg can legitimately read 0
+	// when nothing draws on it.
+	CurrentL1       sql.NullFloat64
+	CurrentL2       sql.NullFloat64
+	PowerL1         sql.NullFloat64
+	PowerL2         sql.NullFloat64
+	ApparentPowerL1 sql.NullFloat64
+	ApparentPowerL2 sql.NullFloat64
+	ReactivePowerL1 sql.NullFloat64
+	ReactivePowerL2 sql.NullFloat64
+	PowerFactorL1   sql.NullFloat64
+	PowerFactorL2   sql.NullFloat64
+
+	EnergyImport sql.NullFloat64
+	EnergyExport sql.NullFloat64
+	EnergyTotal  sql.NullFloat64
 
 	Status string // "online" | "stale"
 }
@@ -337,30 +433,46 @@ func upsertEnergyMeter(db *sql.DB, m EnergyMeterStatus, updatedAt string) error 
 INSERT INTO energy_meter_status
     (id, source, madbus_id, name, voltage, current, frequency, power,
      apparent_power, reactive_power, power_factor,
+     current_l1, current_l2, power_l1, power_l2,
+     apparent_power_l1, apparent_power_l2, reactive_power_l1, reactive_power_l2,
+     power_factor_l1, power_factor_l2,
      energy_import, energy_export, energy_total, status, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
-    source         = excluded.source,
-    madbus_id      = excluded.madbus_id,
-    name           = excluded.name,
-    voltage        = excluded.voltage,
-    current        = excluded.current,
-    frequency      = excluded.frequency,
-    power          = excluded.power,
-    apparent_power = excluded.apparent_power,
-    reactive_power = excluded.reactive_power,
-    power_factor   = excluded.power_factor,
-    energy_import  = excluded.energy_import,
-    energy_export  = excluded.energy_export,
-    energy_total   = excluded.energy_total,
-    status         = excluded.status,
-    updated_at     = excluded.updated_at;`
+    source            = excluded.source,
+    madbus_id         = excluded.madbus_id,
+    name              = excluded.name,
+    voltage           = excluded.voltage,
+    current           = excluded.current,
+    frequency         = excluded.frequency,
+    power             = excluded.power,
+    apparent_power    = excluded.apparent_power,
+    reactive_power    = excluded.reactive_power,
+    power_factor      = excluded.power_factor,
+    current_l1        = excluded.current_l1,
+    current_l2        = excluded.current_l2,
+    power_l1          = excluded.power_l1,
+    power_l2          = excluded.power_l2,
+    apparent_power_l1 = excluded.apparent_power_l1,
+    apparent_power_l2 = excluded.apparent_power_l2,
+    reactive_power_l1 = excluded.reactive_power_l1,
+    reactive_power_l2 = excluded.reactive_power_l2,
+    power_factor_l1   = excluded.power_factor_l1,
+    power_factor_l2   = excluded.power_factor_l2,
+    energy_import     = excluded.energy_import,
+    energy_export     = excluded.energy_export,
+    energy_total      = excluded.energy_total,
+    status            = excluded.status,
+    updated_at        = excluded.updated_at;`
 
 	_, err := db.Exec(
 		query,
 		m.ID, m.Source, m.MadbusID, m.Name,
 		m.Voltage, m.Current, m.Frequency, m.Power,
 		m.ApparentPower, m.ReactivePower, m.PowerFactor,
+		m.CurrentL1, m.CurrentL2, m.PowerL1, m.PowerL2,
+		m.ApparentPowerL1, m.ApparentPowerL2, m.ReactivePowerL1, m.ReactivePowerL2,
+		m.PowerFactorL1, m.PowerFactorL2,
 		m.EnergyImport, m.EnergyExport, m.EnergyTotal,
 		m.Status, updatedAt,
 	)
@@ -377,13 +489,15 @@ ON CONFLICT(id) DO UPDATE SET
 func insertEnergyMeterHistory(db *sql.DB, m EnergyMeterStatus, ts string) error {
 	const query = `
 INSERT OR IGNORE INTO energy_meter_history
-    (device_id, ts, voltage, current, power, frequency, power_factor, energy_total)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
+    (device_id, ts, voltage, current, power, frequency, power_factor, energy_total,
+     power_l1, power_l2, current_l1, current_l2, power_factor_l1, power_factor_l2)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err := db.Exec(
 		query,
 		m.ID, ts,
 		m.Voltage, m.Current, m.Power, m.Frequency, m.PowerFactor, m.EnergyTotal,
+		m.PowerL1, m.PowerL2, m.CurrentL1, m.CurrentL2, m.PowerFactorL1, m.PowerFactorL2,
 	)
 	if err != nil {
 		return fmt.Errorf("insert energy meter history %d: %w", m.ID, err)

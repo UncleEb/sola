@@ -250,9 +250,23 @@ type meterJSON struct {
 	ApparentPower *float64 `json:"apparent_power"`
 	ReactivePower *float64 `json:"reactive_power"`
 	PowerFactor   *float64 `json:"power_factor"`
-	EnergyImport  *float64 `json:"energy_import"`
-	EnergyExport  *float64 `json:"energy_export"`
-	EnergyTotal   *float64 `json:"energy_total"`
+
+	// Per-leg (split-phase L1/L2). null on a single-phase meter or when idle
+	// data is absent; a leg reads 0 when nothing draws on it.
+	CurrentL1       *float64 `json:"current_l1"`
+	CurrentL2       *float64 `json:"current_l2"`
+	PowerL1         *float64 `json:"power_l1"`
+	PowerL2         *float64 `json:"power_l2"`
+	ApparentPowerL1 *float64 `json:"apparent_power_l1"`
+	ApparentPowerL2 *float64 `json:"apparent_power_l2"`
+	ReactivePowerL1 *float64 `json:"reactive_power_l1"`
+	ReactivePowerL2 *float64 `json:"reactive_power_l2"`
+	PowerFactorL1   *float64 `json:"power_factor_l1"`
+	PowerFactorL2   *float64 `json:"power_factor_l2"`
+
+	EnergyImport *float64 `json:"energy_import"`
+	EnergyExport *float64 `json:"energy_export"`
+	EnergyTotal  *float64 `json:"energy_total"`
 
 	Status    string  `json:"status"`
 	UpdatedAt *string `json:"updated_at"`
@@ -449,6 +463,9 @@ func (s *dashboardServer) queryEnergyMeters() ([]meterJSON, error) {
 	const query = `
 SELECT id, source, madbus_id, name, voltage, current, frequency, power,
        apparent_power, reactive_power, power_factor,
+       current_l1, current_l2, power_l1, power_l2,
+       apparent_power_l1, apparent_power_l2, reactive_power_l1, reactive_power_l2,
+       power_factor_l1, power_factor_l2,
        energy_import, energy_export, energy_total, status, updated_at
 FROM energy_meter_status
 ORDER BY id;`
@@ -474,16 +491,31 @@ ORDER BY id;`
 			apparentPower sql.NullFloat64
 			reactivePower sql.NullFloat64
 			powerFactor   sql.NullFloat64
-			energyImport  sql.NullFloat64
-			energyExport  sql.NullFloat64
-			energyTotal   sql.NullFloat64
-			status        string
-			updatedAt     sql.NullString
+
+			currentL1       sql.NullFloat64
+			currentL2       sql.NullFloat64
+			powerL1         sql.NullFloat64
+			powerL2         sql.NullFloat64
+			apparentPowerL1 sql.NullFloat64
+			apparentPowerL2 sql.NullFloat64
+			reactivePowerL1 sql.NullFloat64
+			reactivePowerL2 sql.NullFloat64
+			powerFactorL1   sql.NullFloat64
+			powerFactorL2   sql.NullFloat64
+
+			energyImport sql.NullFloat64
+			energyExport sql.NullFloat64
+			energyTotal  sql.NullFloat64
+			status       string
+			updatedAt    sql.NullString
 		)
 
 		if err := rows.Scan(
 			&id, &source, &madbusID, &name, &voltage, &current, &frequency, &power,
 			&apparentPower, &reactivePower, &powerFactor,
+			&currentL1, &currentL2, &powerL1, &powerL2,
+			&apparentPowerL1, &apparentPowerL2, &reactivePowerL1, &reactivePowerL2,
+			&powerFactorL1, &powerFactorL2,
 			&energyImport, &energyExport, &energyTotal, &status, &updatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan energy meter: %w", err)
@@ -501,11 +533,23 @@ ORDER BY id;`
 			ApparentPower: nullFloat(apparentPower),
 			ReactivePower: nullFloat(reactivePower),
 			PowerFactor:   nullFloat(powerFactor),
-			EnergyImport:  nullFloat(energyImport),
-			EnergyExport:  nullFloat(energyExport),
-			EnergyTotal:   nullFloat(energyTotal),
-			Status:        status,
-			UpdatedAt:     nullString(updatedAt),
+
+			CurrentL1:       nullFloat(currentL1),
+			CurrentL2:       nullFloat(currentL2),
+			PowerL1:         nullFloat(powerL1),
+			PowerL2:         nullFloat(powerL2),
+			ApparentPowerL1: nullFloat(apparentPowerL1),
+			ApparentPowerL2: nullFloat(apparentPowerL2),
+			ReactivePowerL1: nullFloat(reactivePowerL1),
+			ReactivePowerL2: nullFloat(reactivePowerL2),
+			PowerFactorL1:   nullFloat(powerFactorL1),
+			PowerFactorL2:   nullFloat(powerFactorL2),
+
+			EnergyImport: nullFloat(energyImport),
+			EnergyExport: nullFloat(energyExport),
+			EnergyTotal:  nullFloat(energyTotal),
+			Status:       status,
+			UpdatedAt:    nullString(updatedAt),
 		})
 	}
 
@@ -1135,6 +1179,14 @@ func (s *dashboardServer) handleHistory(w http.ResponseWriter, r *http.Request) 
 			{Key: "frequency", Label: "Frequency", Unit: "Hz", column: "frequency", agg: "avg"},
 			{Key: "power_factor", Label: "Power Factor", column: "power_factor", agg: "avg"},
 			{Key: "energy_total", Label: "Total Energy", Unit: "kWh", column: "energy_total", agg: "max"},
+			// Per-leg (split-phase L1/L2). Present only once the meter has logged
+			// per-leg history; single-phase meters leave these flat/empty.
+			{Key: "power_l1", Label: "Power (L1)", Unit: "W", column: "power_l1", agg: "avg"},
+			{Key: "power_l2", Label: "Power (L2)", Unit: "W", column: "power_l2", agg: "avg"},
+			{Key: "current_l1", Label: "Current (L1)", Unit: "A", column: "current_l1", agg: "avg"},
+			{Key: "current_l2", Label: "Current (L2)", Unit: "A", column: "current_l2", agg: "avg"},
+			{Key: "power_factor_l1", Label: "Power Factor (L1)", column: "power_factor_l1", agg: "avg"},
+			{Key: "power_factor_l2", Label: "Power Factor (L2)", column: "power_factor_l2", agg: "avg"},
 		}
 	} else {
 		series = []seriesDef{

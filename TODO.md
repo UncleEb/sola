@@ -27,16 +27,6 @@ one-off notes.
   poll mapping, dashboard pane). Until each type is wired, `validate()` only
   permits a MadBus source on `energy_meter` so nothing half-built is
   configurable — extend that allow-list as each type lands.
-- **Per-leg / split-phase energy meter readings.** Today the energy-meter model
-  is single-value: [buildMeterStatus in main.go](main.go) reads only aggregate
-  `ac.*` keys (`ac.voltage`, `ac.current`, `ac.power`, …) and the
-  `energy_meter_status`/`energy_meter_history` tables in [db.go](db.go) have one
-  column per metric. A split-phase (240V/L1+L2) meter is collapsed to one number,
-  which hides what's actually happening per leg. When MadBus exposes per-leg keys
-  (e.g. `ac.voltage.l1`/`.l2`, `ac.current.l1`/`.l2`, `ac.power.l1`/`.l2` — the
-  MadBus half of this), ingest them: add the columns, map the new keys, extend
-  `EnergyMeterStatus`/`meterJSON`, and render L1/L2 side by side in the meter
-  pane (the full-width panes have room). Requires the MadBus-side change first.
 - **Per-source health in the UI.** Surface each source's reachability (last poll
   ok/failed, last error) in Settings → Data Sources so a misconfigured or
   unreachable source is obvious. Pairs naturally with Phase 2's per-source health.

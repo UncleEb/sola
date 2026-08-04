@@ -574,6 +574,42 @@ main {
 .panel--offline { opacity: 0.65; }
 .panel--stale { opacity: 0.85; }
 
+/* Split-phase per-leg breakdown inside a meter pane. */
+.meter__legs-section {
+    margin-top: 1.25rem;
+    border-top: 1px solid var(--glass-border);
+    padding-top: 1rem;
+}
+
+.meter__subtitle {
+    margin: 0 0 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.meter__legs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1rem;
+}
+
+.meter__leg {
+    background: var(--glass-bg-2);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    padding: 1rem;
+}
+
+.meter__leg-title {
+    margin: 0 0 0.75rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
 .footer {
     text-align: center;
     padding: 1rem;
